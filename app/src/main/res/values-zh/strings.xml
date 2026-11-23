@@ -148,6 +148,7 @@
     <string name="target_message_body">消息内容</string>
     <string name="target_server_names">服务器名称</string>
     <string name="target_channel_names">频道名称</string>
+    <string name="hint_name_targets">名称翻译适用于 Discord 352.17 的语音浮层及语音频道选择器搜索结果。</string>
     <string name="label_context_mode">精翻模式</string>
     <string name="label_context_characters">上下文字符上限</string>
     <string name="hint_context_mode">在翻译范围允许的频道或私信内，将先前已显示的消息作为上下文发送给翻译服务。</string>

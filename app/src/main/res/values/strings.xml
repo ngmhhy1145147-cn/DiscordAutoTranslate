@@ -148,6 +148,7 @@
     <string name="target_message_body">Message content</string>
     <string name="target_server_names">Server names</string>
     <string name="target_channel_names">Channel names</string>
+    <string name="hint_name_targets">In Discord 352.17, names can be translated in the voice overlay and voice channel search results.</string>
     <string name="label_context_mode">Context-aware translation</string>
     <string name="label_context_characters">Maximum context characters</string>
     <string name="hint_context_mode">Sends preceding messages already seen in the same channel or DM to your translation provider as context, within your translation scope.</string>

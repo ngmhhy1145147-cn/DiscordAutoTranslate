@@ -635,13 +635,11 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
         messageTarget = addOption(parent, R.string.target_message_body);
         serverNameTarget = addOption(parent, R.string.target_server_names);
         channelNameTarget = addOption(parent, R.string.target_channel_names);
+        addOptionHint(parent, R.string.hint_name_targets);
         contextEnabledInput = addOption(parent, R.string.label_context_mode);
         contextCharactersInput = addField(parent, getString(R.string.label_context_characters),
                 Integer.toString(Config.DEF_CONTEXT_CHARACTERS), InputType.TYPE_CLASS_NUMBER);
-        TextView contextHint = new TextView(this);
-        contextHint.setTextSize(12f);
-        contextHint.setText(R.string.hint_context_mode);
-        parent.addView(contextHint, matchWrap());
+        addOptionHint(parent, R.string.hint_context_mode);
 
         TextView glossaryLabel = new TextView(this);
         glossaryLabel.setText(R.string.label_glossary);
@@ -662,10 +660,7 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
                     ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         }
         parent.addView(glossaryButtons, matchWrap());
-        TextView glossaryHint = new TextView(this);
-        glossaryHint.setTextSize(12f);
-        glossaryHint.setText(R.string.hint_glossary);
-        parent.addView(glossaryHint, matchWrap());
+        addOptionHint(parent, R.string.hint_glossary);
         showGlossary(glossaryDraft);
         glossarySpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
@@ -697,6 +692,13 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
         input.setOnCheckedChangeListener((button, checked) -> markDirty());
         parent.addView(input, matchWrap());
         return input;
+    }
+
+    private void addOptionHint(LinearLayout parent, int text) {
+        TextView hint = new TextView(this);
+        hint.setTextSize(12f);
+        hint.setText(text);
+        parent.addView(hint, matchWrap());
     }
 
     private void showGlossary(GlossaryLibrary library) {

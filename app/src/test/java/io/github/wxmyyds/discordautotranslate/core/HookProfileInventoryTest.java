@@ -14,6 +14,7 @@ import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -36,8 +37,10 @@ public class HookProfileInventoryTest {
 
     @Test
     public void everyShippedProfileMatchesItsFilenameAndDeclaresInstalledHooks() throws Exception {
-        Set<String> supported = Set.of("message.bind", "message.render", "message.textConversion",
+        Set<String> baselineHooks = Set.of("message.bind", "message.render", "message.textConversion",
                 "embed.bind", "poll.bind", "poll.answerBind", "poll.textSet", "poll.accessibilitySet");
+        Map<Integer, Set<String>> nameHooksByVersion = Map.of(
+                352017, Set.of("name.voiceOverlay", "name.voiceChannelSelector"));
         List<Path> paths;
         try (Stream<Path> files = Files.list(Path.of("src/main/assets/hook-config"))) {
             paths = files.sorted().collect(Collectors.toList());
@@ -55,7 +58,11 @@ public class HookProfileInventoryTest {
             JSONObject hooks = root.getJSONObject("hooks");
             Set<String> configured = new HashSet<>();
             hooks.keys().forEachRemaining(configured::add);
-            assertEquals(supported, configured);
+            Set<String> nameHooks = nameHooksByVersion.getOrDefault(version, Set.of());
+            Set<String> expected = new HashSet<>(baselineHooks);
+            expected.addAll(nameHooks);
+            assertEquals("Installed hooks for " + version, expected, configured);
+            assertEquals("Enabled label hooks for " + version, nameHooks, config.nameHooks());
             for (String id : configured) {
                 JSONObject target = hooks.getJSONObject(id).getJSONObject("target");
                 String context = version + " " + id;
@@ -91,9 +98,9 @@ public class HookProfileInventoryTest {
                 assertNotNull(config.hook(id));
                 assertTrue(config.isEnabled(id));
             }
-            assertEquals(supported, ids);
-            assertTrue(config.hasAllRequiredHooks(supported));
-            Set<String> incomplete = new HashSet<>(supported);
+            assertEquals(baselineHooks, ids);
+            assertTrue(config.hasAllRequiredHooks(baselineHooks));
+            Set<String> incomplete = new HashSet<>(expected);
             incomplete.remove("message.bind");
             assertFalse(config.hasAllRequiredHooks(incomplete));
         }

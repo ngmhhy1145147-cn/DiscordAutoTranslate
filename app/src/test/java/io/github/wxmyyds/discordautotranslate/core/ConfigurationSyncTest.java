@@ -43,7 +43,9 @@ public class ConfigurationSyncTest {
 
         assertTrue(ConfigurationSync.save(local.prefs, remote.prefs, draft).succeeded());
         Config.Snapshot stored = ConfigurationSync.loadLocal(local.prefs).snapshot;
-        Config.Snapshot synced = Config.read(remote.prefs);
+        MemoryPrefs remoteSnapshot = new MemoryPrefs();
+        remote.disk.forEach(remoteSnapshot::put);
+        Config.Snapshot synced = Config.read(remoteSnapshot);
         assertEquals(draft.version(), stored.version());
         assertEquals(draft.version(), synced.version());
         assertEquals("Games", synced.glossaryLibrary.activeName());
