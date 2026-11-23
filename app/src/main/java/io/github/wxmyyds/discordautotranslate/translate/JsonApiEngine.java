@@ -1,5 +1,7 @@
 package io.github.wxmyyds.discordautotranslate.translate;
 
+import androidx.annotation.Nullable;
+
 import java.util.concurrent.ConcurrentHashMap;
 
 import io.github.wxmyyds.discordautotranslate.core.Config;
@@ -63,13 +65,22 @@ public final class JsonApiEngine implements Scheduler.Engine {
         }
     }
 
-    @Override
     public String translate(String text) throws Exception {
-        return execute(text, true).translated;
+        return translate(text, null);
+    }
+
+    @Override
+    public String translate(String text, @Nullable String precedingContext) throws Exception {
+        return execute(text, true, precedingContext).translated;
     }
 
     /** Connection probes share all request/decoder ownership, but do not judge translation safety. */
     Exchange execute(String text, boolean validateTranslation) throws Exception {
+        return execute(text, validateTranslation, null);
+    }
+
+    private Exchange execute(String text, boolean validateTranslation,
+                             @Nullable String precedingContext) throws Exception {
         Thread worker = Thread.currentThread();
         Http.Request request = new Http.Request();
         if (active.putIfAbsent(worker, request) != null) {
@@ -83,7 +94,7 @@ public final class JsonApiEngine implements Scheduler.Engine {
                 throw new TranslationException(TranslationException.Kind.EMPTY, "原文为空，无需翻译");
             }
             Http.Headers headers = validateConfig(cfg);
-            Http.Response response = requestOnce(text, request, headers);
+            Http.Response response = requestOnce(text, precedingContext, request, headers);
             String translated = response.body;
             if (translated == null || translated.trim().isEmpty()) {
                 throw new TranslationException(TranslationException.Kind.EMPTY,
@@ -109,14 +120,15 @@ public final class JsonApiEngine implements Scheduler.Engine {
     }
 
     /** Sends exactly once and retains the decoded response status for post-request validation. */
-    private Http.Response requestOnce(String text, Http.Request request, Http.Headers headers)
+    private Http.Response requestOnce(String text, @Nullable String precedingContext,
+                                      Http.Request request, Http.Headers headers)
             throws Exception {
         // 1) 单一输入按协议构造请求体；已保存提示词也追加原样保留结构标记的规则。
         boolean sse = cfg.streaming;
         String systemPrompt = Config.DEF_SYSTEM_PROMPT.equals(cfg.systemPrompt)
                 ? Config.defaultSystemPromptFor(cfg.targetLang) : cfg.systemPrompt;
         String body = Protocols.requestBody(cfg.protocol, text, systemPrompt, cfg.model,
-                sse);
+                sse, precedingContext, cfg.glossary);
         buildHeaders(headers);
 
         // Decoder selection is fixed for this request; no reparsing or mode detection.
@@ -127,7 +139,7 @@ public final class JsonApiEngine implements Scheduler.Engine {
 
         // 3) 状态码归类
         if (!resp.isSuccess()) {
-            throw classifyHttpError(resp);
+            throw classifyHttpError(resp, precedingContext == null && cfg.glossary.isEmpty());
         }
 
         // Successful HTTP bodies have already passed the selected protocol decoder.
@@ -210,11 +222,12 @@ public final class JsonApiEngine implements Scheduler.Engine {
         }
     }
 
-    /** Classifies HTTP status, logs its exact error body under the saved gate, and retains it for UI. */
-    private TranslationException classifyHttpError(Http.Response resp) {
+    /** Contextual requests can echo the reference text or glossary in an upstream error. */
+    private TranslationException classifyHttpError(Http.Response resp, boolean logResponseBody) {
         int status = resp.status;
         if (resp.body != null && !resp.body.isEmpty()) {
-            ProjectLog.warn("api.upstream.error httpStatus=" + status + " body=" + resp.body);
+            ProjectLog.warn("api.upstream.error httpStatus=" + status
+                    + (logResponseBody ? " body=" + resp.body : ""));
         }
         TranslationException.Kind kind = status == 429
                 ? TranslationException.Kind.RATE_LIMIT : TranslationException.Kind.HTTP;

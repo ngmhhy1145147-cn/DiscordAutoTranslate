@@ -42,6 +42,7 @@ public final class HookConfiguration {
         validateHookSelectors(hooks);
         validateEmbedInput(hooks);
         validatePollInput(hooks);
+        validateNameInput(hooks);
         validateNodeConstructors(root);
         return new HookConfiguration(versionCode, json, root);
     }
@@ -187,6 +188,35 @@ public final class HookConfiguration {
     private static void validateIndex(JSONObject spec, String key, int count) throws JSONException {
         int index = spec.getInt(key);
         if (index < 0 || index >= count) throw new JSONException("invalid configured argument: " + key);
+    }
+
+    private static void validateNameInput(JSONObject hooks) throws JSONException {
+        Iterator<String> keys = hooks.keys();
+        while (keys.hasNext()) {
+            String id = keys.next();
+            if (!id.startsWith("name.")) continue;
+            JSONObject binding = hooks.getJSONObject(id);
+            JSONObject target = binding.getJSONObject("target");
+            int count = target.getInt("parameterCount");
+            int viewArgument = binding.getInt("viewArgument");
+            if (target.getBoolean("static") || !"void".equals(target.getString("returnType"))
+                    || target.getJSONObject("parameterTypes").length() != count
+                    || viewArgument < -1 || viewArgument >= count) {
+                throw new JSONException("Invalid name binding target");
+            }
+            validateIndex(binding, "modelArgument", count);
+            for (String key : new String[]{"viewPath", "modelPath"}) {
+                JSONArray path = binding.getJSONArray(key);
+                for (int i = 0; i < path.length(); i++) requireMetadataString(path.get(i), key);
+            }
+            validateFieldPath(binding, "guildIdPath");
+            validateFieldPath(binding, "channelIdPath");
+            int server = binding.getInt("serverViewId");
+            int channel = binding.getInt("channelViewId");
+            if (server <= 0 || channel <= 0 || server == channel) {
+                throw new JSONException("Invalid name binding resource IDs");
+            }
+        }
     }
 
     private static void validateFieldPath(JSONObject spec, String key) throws JSONException {
@@ -407,6 +437,18 @@ public final class HookConfiguration {
     public JSONObject hook(String id) {
         JSONObject hooks = root.optJSONObject("hooks");
         return hooks == null ? null : hooks.optJSONObject(id);
+    }
+
+    public Set<String> nameHooks() {
+        Set<String> names = new java.util.LinkedHashSet<>();
+        JSONObject hooks = root.optJSONObject("hooks");
+        if (hooks == null) return names;
+        Iterator<String> keys = hooks.keys();
+        while (keys.hasNext()) {
+            String key = keys.next();
+            if (key.startsWith("name.") && isEnabled(key)) names.add(key);
+        }
+        return names;
     }
 
     @Nullable

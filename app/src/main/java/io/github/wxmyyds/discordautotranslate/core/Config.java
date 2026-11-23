@@ -4,6 +4,8 @@ import android.content.SharedPreferences;
 
 import androidx.annotation.Nullable;
 
+import java.util.Map;
+
 /**
  * 模块配置的键名、默认值与快照。
  *
@@ -25,6 +27,21 @@ public final class Config {
 
     // ---- 翻译范围（默认策略、服务器及频道规则）----
     public static final String KEY_TRANSLATION_SCOPE = "translation_scope";
+
+    // ---- 翻译对象、上下文与术语包 ----
+    public static final String KEY_TRANSLATE_MESSAGES = "translate_messages";
+    public static final String KEY_TRANSLATE_SERVER_NAMES = "translate_server_names";
+    public static final String KEY_TRANSLATE_CHANNEL_NAMES = "translate_channel_names";
+    public static final boolean DEF_TRANSLATE_MESSAGES = true;
+    public static final boolean DEF_TRANSLATE_SERVER_NAMES = false;
+    public static final boolean DEF_TRANSLATE_CHANNEL_NAMES = false;
+    public static final String KEY_CONTEXT_ENABLED = "context_enabled";
+    public static final String KEY_CONTEXT_CHARACTERS = "context_characters";
+    public static final boolean DEF_CONTEXT_ENABLED = false;
+    public static final int DEF_CONTEXT_CHARACTERS = 100;
+    public static final int MIN_CONTEXT_CHARACTERS = 1;
+    public static final int MAX_CONTEXT_CHARACTERS = 1000;
+    public static final String KEY_GLOSSARY_LIBRARY = "glossary_library";
 
     // ---- 项目日志（不参与翻译配置版本）----
     public static final String KEY_LOGGING_ENABLED = "logging_enabled";
@@ -135,6 +152,13 @@ public final class Config {
         public final boolean enabled;
         public final boolean loggingEnabled;
         public final TranslationScope translationScope;
+        public final boolean translateMessages;
+        public final boolean translateServerNames;
+        public final boolean translateChannelNames;
+        public final boolean contextEnabled;
+        public final int contextCharacters;
+        public final GlossaryLibrary glossaryLibrary;
+        public final Map<String, String> glossary;
         public final String apiUrl;
         public final String apiKey;
         public final String model;
@@ -156,6 +180,17 @@ public final class Config {
             loggingEnabled = readBoolean(p, KEY_LOGGING_ENABLED, DEF_LOGGING_ENABLED);
             translationScope = p.contains(KEY_TRANSLATION_SCOPE)
                     ? TranslationScope.parse(p.getString(KEY_TRANSLATION_SCOPE, null)) : TranslationScope.ALL;
+            translateMessages = readBoolean(p, KEY_TRANSLATE_MESSAGES, DEF_TRANSLATE_MESSAGES);
+            translateServerNames = readBoolean(p, KEY_TRANSLATE_SERVER_NAMES, DEF_TRANSLATE_SERVER_NAMES);
+            translateChannelNames = readBoolean(p, KEY_TRANSLATE_CHANNEL_NAMES, DEF_TRANSLATE_CHANNEL_NAMES);
+            contextEnabled = readBoolean(p, KEY_CONTEXT_ENABLED, DEF_CONTEXT_ENABLED);
+            contextCharacters = positiveInt(p, KEY_CONTEXT_CHARACTERS, DEF_CONTEXT_CHARACTERS);
+            if (contextCharacters > MAX_CONTEXT_CHARACTERS) {
+                throw new IllegalArgumentException("Invalid context length");
+            }
+            glossaryLibrary = p.contains(KEY_GLOSSARY_LIBRARY)
+                    ? GlossaryLibrary.parse(p.getString(KEY_GLOSSARY_LIBRARY, null)) : GlossaryLibrary.EMPTY;
+            glossary = glossaryLibrary.activeTerms();
             apiUrl = str(p, KEY_API_URL, DEF_API_URL);
             apiKey = str(p, KEY_API_KEY, DEF_API_KEY);
             model = str(p, KEY_MODEL, DEF_MODEL);
@@ -174,6 +209,13 @@ public final class Config {
             enabled = DEF_ENABLED;
             loggingEnabled = DEF_LOGGING_ENABLED;
             translationScope = TranslationScope.ALL;
+            translateMessages = DEF_TRANSLATE_MESSAGES;
+            translateServerNames = DEF_TRANSLATE_SERVER_NAMES;
+            translateChannelNames = DEF_TRANSLATE_CHANNEL_NAMES;
+            contextEnabled = DEF_CONTEXT_ENABLED;
+            contextCharacters = DEF_CONTEXT_CHARACTERS;
+            glossaryLibrary = GlossaryLibrary.EMPTY;
+            glossary = glossaryLibrary.activeTerms();
             apiUrl = DEF_API_URL;
             apiKey = DEF_API_KEY;
             model = DEF_MODEL;
@@ -245,6 +287,11 @@ public final class Config {
             return encode(apiUrl) + encode(model) + encode(targetLang) + encode(protocol)
                     + encode(Boolean.toString(streaming)) + encode(systemPrompt)
                     + encode(configError == null ? "" : "invalid")
+                    + encode(Boolean.toString(translateMessages))
+                    + encode(Boolean.toString(translateServerNames))
+                    + encode(Boolean.toString(translateChannelNames))
+                    + encode(contextEnabled ? Integer.toString(contextCharacters) : "")
+                    + encode(glossaryLibrary.activeFingerprint())
                     + encode(credentialFingerprint());
         }
 

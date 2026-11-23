@@ -33,8 +33,7 @@ public class EmbedCardStateTest {
     private final StateStore store = StateStore.get();
     private final BlockingQueue<Runnable> deliveries = new LinkedBlockingQueue<>();
     private final List<String> requests = Collections.synchronizedList(new ArrayList<>());
-    private Config.Snapshot previousConfig;
-    private Scheduler.Engine previousEngine;
+    private HookBridge.TranslationConfiguration previousConfiguration;
 
     @Before
     public void setup() throws Exception {
@@ -48,13 +47,12 @@ public class EmbedCardStateTest {
         TranslationCache.get().clear();
         RerenderRegistry.clear();
         RenderDispatcher.reset();
-        previousConfig = (Config.Snapshot) bridgeField("config").get(bridge);
-        previousEngine = (Scheduler.Engine) bridgeField("engine").get(bridge);
-        bridgeField("config").set(bridge, Config.read(new MemoryPrefs()
+        previousConfiguration = bridge.translationConfiguration();
+        Config.Snapshot testConfig = Config.read(new MemoryPrefs()
                 .put(Config.KEY_ENABLED, true)
                 .put(Config.KEY_API_URL, "https://example.invalid/unused")
-                .put(Config.KEY_TARGET_LANG, "Simplified Chinese")));
-        installEngine(false);
+                .put(Config.KEY_TARGET_LANG, "Simplified Chinese"));
+        installEngine(testConfig, false);
         installQueuedDispatcher();
         HookRuntime.activate();
     }
@@ -71,8 +69,7 @@ public class EmbedCardStateTest {
             bridge.reset();
             store.onNewGeneration();
             TranslationCache.get().clear();
-            if (previousConfig != null) bridgeField("config").set(bridge, previousConfig);
-            if (previousEngine != null) bridgeField("engine").set(bridge, previousEngine);
+            if (previousConfiguration != null) bridgeField("configuration").set(bridge, previousConfiguration);
             ContentNodeTestProfile.clear();
         }
     }
@@ -84,11 +81,16 @@ public class EmbedCardStateTest {
     }
 
     private void installEngine(boolean fail) throws Exception {
-        bridgeField("engine").set(bridge, (Scheduler.Engine) text -> {
+        installEngine(bridge.translationConfiguration().snapshot, fail);
+    }
+
+    private void installEngine(Config.Snapshot config, boolean fail) throws Exception {
+        bridgeField("configuration").set(bridge, new HookBridge.TranslationConfiguration(
+                config, (text, precedingContext) -> {
             requests.add(text);
             if (fail) throw new IllegalStateException("fake translation failure");
             return "译文：" + text;
-        });
+        }));
     }
 
     /** Use the existing package-private test dispatcher seam from the hooks test package. */

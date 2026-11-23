@@ -32,8 +32,7 @@ public class TranslationScopeBridgeTest {
     private static final String OTHER_ROW = "123456789012345679";
     private final HookBridge bridge = HookBridge.get();
     private final StateStore store = StateStore.get();
-    private Config.Snapshot previousConfig;
-    private Scheduler.Engine previousEngine;
+    private HookBridge.TranslationConfiguration previousConfiguration;
     private HookConfiguration previousProfile;
     private boolean previousRuntimeActive;
 
@@ -42,8 +41,7 @@ public class TranslationScopeBridgeTest {
         previousRuntimeActive = HookRuntime.isActive();
         assertTrue("Previous runtime calls must drain", HookRuntime.suspendAndAwait(5000L));
         previousProfile = HookConfiguration.activeConfiguration();
-        previousConfig = (Config.Snapshot) bridgeField("config").get(bridge);
-        previousEngine = (Scheduler.Engine) bridgeField("engine").get(bridge);
+        previousConfiguration = bridge.translationConfiguration();
         assertTrue("Previous scheduler must terminate", Scheduler.resetAndAwait(5000L));
         Scheduler.MainThread.clear();
         RerenderRegistry.clear();
@@ -68,8 +66,7 @@ public class TranslationScopeBridgeTest {
             store.onNewGeneration();
             TranslationCache.get().clear();
             // Restore fields directly: updateConfig here would create another scheduler.
-            bridgeField("config").set(bridge, previousConfig);
-            bridgeField("engine").set(bridge, previousEngine);
+            bridgeField("configuration").set(bridge, previousConfiguration);
             HookConfiguration.activate(previousProfile);
             if (previousRuntimeActive) HookRuntime.activate();
         }
@@ -95,6 +92,47 @@ public class TranslationScopeBridgeTest {
             }
             assertFalse(key, bridge.translationAllowed(key, config));
         }
+    }
+
+    @Test
+    public void disablingMessageTargetsGatesStandingBodyEmbedAndPollState() {
+        Config.Snapshot disabled = Config.read(new MemoryPrefs()
+                .put(Config.KEY_ENABLED, true).put(Config.KEY_TRANSLATE_MESSAGES, false));
+        bridge.updateConfig(disabled);
+        bridge.rememberMessageLocation(ROW, new MessageLocation("10", "20"));
+        for (String key : keys(ROW)) {
+            assertFalse(bridge.translationAllowed(key, disabled));
+            assertFalse(bridge.scopeAllowsDisplay(key));
+        }
+    }
+
+    @Test
+    public void contextualRebindChangesRequestIdentityWithoutMakingExistingRenderStaleEarly()
+            throws Exception {
+        Config.Snapshot contextual = Config.read(new MemoryPrefs()
+                .put(Config.KEY_TARGET_LANG, "简体中文")
+                .put(Config.KEY_CONTEXT_ENABLED, true));
+        bridge.updateConfig(contextual);
+        forbidRequests();
+        MessageLocation location = new MessageLocation("10", "20");
+        bridge.rememberMessageLocation(ROW, location);
+        bridge.rememberMessageLocation(OTHER_ROW, location);
+        PrimitiveStructurableText subject = new PrimitiveStructurableText("当前正文用于检测");
+        bridge.onMessageBound(ROW, new PrimitiveStructurableText("对话的早期内容"));
+        bridge.onMessageBound(OTHER_ROW, subject);
+        StateStore.Entry first = store.peek(OTHER_ROW);
+        assertNotNull(first);
+        assertFalse(first.contextHash.isEmpty());
+        assertSame(first, bridge.matchingState(OTHER_ROW, TextExtractor.extract(subject)));
+
+        bridge.onMessageBound(ROW, new PrimitiveStructurableText("早期内容已编辑"));
+        assertSame(first, bridge.matchingState(OTHER_ROW, TextExtractor.extract(subject)));
+        bridge.onMessageBound(OTHER_ROW, subject);
+        StateStore.Entry revised = store.peek(OTHER_ROW);
+        assertNotNull(revised);
+        assertNotEquals(first.contentHash, revised.contentHash);
+        assertNotEquals(first.contextHash, revised.contextHash);
+        assertSame(revised, bridge.matchingState(OTHER_ROW, TextExtractor.extract(subject)));
     }
 
     @Test
@@ -164,11 +202,11 @@ public class TranslationScopeBridgeTest {
         for (Config.Snapshot config : denied) {
             // Change only the callback's current snapshot, preserving task ownership so that
             // this test isolates re-admission rather than generation invalidation.
-            bridgeField("config").set(bridge, config);
+            setFakeConfiguration(config, bridge.translationConfiguration().engine);
             bridge.rememberMessageLocation(ROW, new MessageLocation(null, "20"));
             for (String key : keys(ROW)) assertDeniedCallback(key);
         }
-        bridgeField("config").set(bridge, snapshot(true, TranslationScope.ALL));
+        setFakeConfiguration(snapshot(true, TranslationScope.ALL), bridge.translationConfiguration().engine);
         bridge.rememberMessageLocation(ROW, new MessageLocation(null, "20"));
         bridge.forgetMessageLocation(ROW);
         for (String key : keys(ROW)) assertDeniedCallback(key);
@@ -449,9 +487,15 @@ public class TranslationScopeBridgeTest {
 
     /** A regression must fail locally in the fake engine, never contact an API. */
     private void forbidRequests() throws Exception {
-        bridgeField("engine").set(bridge, (Scheduler.Engine) text -> {
+        setFakeConfiguration(bridge.translationConfiguration().snapshot, (text, precedingContext) -> {
             throw new AssertionError("Scope/cache-only test unexpectedly submitted a request");
         });
+    }
+
+    private void setFakeConfiguration(Config.Snapshot snapshot, Scheduler.Engine engine)
+            throws Exception {
+        bridgeField("configuration").set(bridge,
+                new HookBridge.TranslationConfiguration(snapshot, engine));
     }
 
     private void assertDeniedCallback(String key) {

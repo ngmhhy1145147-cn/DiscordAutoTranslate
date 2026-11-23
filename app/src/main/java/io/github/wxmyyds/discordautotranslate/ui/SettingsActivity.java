@@ -3,7 +3,10 @@ package io.github.wxmyyds.discordautotranslate.ui;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
+import android.content.ActivityNotFoundException;
+import android.content.Intent;
 import android.content.SharedPreferences;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -15,6 +18,7 @@ import android.view.ViewGroup;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.Switch;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -28,6 +32,7 @@ import androidx.annotation.Nullable;
 
 import io.github.wxmyyds.discordautotranslate.R;
 import io.github.wxmyyds.discordautotranslate.core.Config;
+import io.github.wxmyyds.discordautotranslate.core.GlossaryLibrary;
 import io.github.wxmyyds.discordautotranslate.core.TranslationScope;
 import io.github.wxmyyds.discordautotranslate.core.ConfigurationSync;
 import io.github.wxmyyds.discordautotranslate.core.Protocols;
@@ -36,10 +41,13 @@ import io.github.wxmyyds.discordautotranslate.core.PreferenceCommit;
 import io.github.wxmyyds.discordautotranslate.core.ProjectLog;
 import io.github.wxmyyds.discordautotranslate.translate.ApiTester;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -54,6 +62,7 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
 
     private static final String LOCAL_PREFS_NAME = "settings_before_activation";
     private static final String STATE_DRAFT = "configuration_draft";
+    private static final int PICK_GLOSSARY = 1;
 
     private static final String[] TARGET_LANGUAGE_VALUES = {
             "简体中文", "繁體中文", "English", "日本語", "한국어", "Русский",
@@ -142,6 +151,16 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
     private Button scopeButton;
     private TextView scopeSummary;
     private TranslationScope scopeDraft = TranslationScope.ALL;
+    private CheckBox messageTarget;
+    private CheckBox serverNameTarget;
+    private CheckBox channelNameTarget;
+    private CheckBox contextEnabledInput;
+    private EditText contextCharactersInput;
+    private Spinner glossarySpinner;
+    private Button glossaryImportButton;
+    private Button glossaryRemoveButton;
+    private GlossaryLibrary glossaryDraft = GlossaryLibrary.EMPTY;
+    private boolean importingGlossary;
     private Dialog scopeDialog;
     private Bundle pendingScopeEditor;
     private static final String STATE_SCOPE_EDITOR = "scope_editor";
@@ -221,6 +240,11 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
         }
         draft.putBoolean("enabled", enabledInput.isChecked());
         draft.putString("scope", scopeDraft.toJson());
+        draft.putBoolean(Config.KEY_TRANSLATE_MESSAGES, messageTarget.isChecked());
+        draft.putBoolean(Config.KEY_TRANSLATE_SERVER_NAMES, serverNameTarget.isChecked());
+        draft.putBoolean(Config.KEY_TRANSLATE_CHANNEL_NAMES, channelNameTarget.isChecked());
+        draft.putBoolean(Config.KEY_CONTEXT_ENABLED, contextEnabledInput.isChecked());
+        draft.putString(Config.KEY_GLOSSARY_LIBRARY, glossaryDraft.toJson());
         draft.putBoolean("logging", loggingInput.isChecked());
         draft.putBoolean("streaming", streamingInput.isChecked());
         draft.putInt("protocol", protocolSpinner.getSelectedItemPosition());
@@ -245,6 +269,14 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
             enabledInput.setChecked(draft.getBoolean("enabled"));
             scopeDraft = TranslationScope.parse(draft.getString("scope"));
             updateScopeSummary();
+            messageTarget.setChecked(draft.getBoolean(Config.KEY_TRANSLATE_MESSAGES, Config.DEF_TRANSLATE_MESSAGES));
+            serverNameTarget.setChecked(draft.getBoolean(Config.KEY_TRANSLATE_SERVER_NAMES,
+                    Config.DEF_TRANSLATE_SERVER_NAMES));
+            channelNameTarget.setChecked(draft.getBoolean(Config.KEY_TRANSLATE_CHANNEL_NAMES,
+                    Config.DEF_TRANSLATE_CHANNEL_NAMES));
+            contextEnabledInput.setChecked(draft.getBoolean(Config.KEY_CONTEXT_ENABLED, Config.DEF_CONTEXT_ENABLED));
+            String glossary = draft.getString(Config.KEY_GLOSSARY_LIBRARY);
+            showGlossary(glossary == null ? GlossaryLibrary.EMPTY : GlossaryLibrary.parse(glossary));
             loggingInput.setChecked(draft.getBoolean("logging", Config.DEF_LOGGING_ENABLED));
             protocolSpinner.setSelection(draft.getInt("protocol"));
             streamingInput.setChecked(draft.getBoolean("streaming"));
@@ -404,6 +436,7 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
         scopeSummary.setTextSize(12f);
         root.addView(scopeSummary, matchWrap());
         updateScopeSummary();
+        addTranslationOptions(root);
 
         loggingInput = new Switch(this);
         loggingHint = addToggle(root, loggingInput, SettingsToggleText.Setting.LOGGING);
@@ -594,6 +627,182 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
                 scopeDraft.servers.size(), scopeDraft.channels.size()));
     }
 
+    private void addTranslationOptions(LinearLayout parent) {
+        TextView targets = new TextView(this);
+        targets.setText(R.string.label_translation_targets);
+        targets.setPadding(0, dp(8), 0, 0);
+        parent.addView(targets, matchWrap());
+        messageTarget = addOption(parent, R.string.target_message_body);
+        serverNameTarget = addOption(parent, R.string.target_server_names);
+        channelNameTarget = addOption(parent, R.string.target_channel_names);
+        contextEnabledInput = addOption(parent, R.string.label_context_mode);
+        contextCharactersInput = addField(parent, getString(R.string.label_context_characters),
+                Integer.toString(Config.DEF_CONTEXT_CHARACTERS), InputType.TYPE_CLASS_NUMBER);
+        TextView contextHint = new TextView(this);
+        contextHint.setTextSize(12f);
+        contextHint.setText(R.string.hint_context_mode);
+        parent.addView(contextHint, matchWrap());
+
+        TextView glossaryLabel = new TextView(this);
+        glossaryLabel.setText(R.string.label_glossary);
+        glossaryLabel.setPadding(0, dp(8), 0, 0);
+        parent.addView(glossaryLabel, matchWrap());
+        glossarySpinner = new Spinner(this);
+        glossarySpinner.setContentDescription(getString(R.string.label_glossary));
+        parent.addView(glossarySpinner, matchWrap());
+        glossaryImportButton = new Button(this);
+        glossaryImportButton.setText(R.string.button_import_glossary);
+        glossaryImportButton.setOnClickListener(view -> pickGlossary());
+        glossaryRemoveButton = new Button(this);
+        glossaryRemoveButton.setText(R.string.button_remove_glossary);
+        glossaryRemoveButton.setOnClickListener(view -> confirmRemoveGlossary());
+        LinearLayout glossaryButtons = new LinearLayout(this);
+        for (Button button : new Button[]{glossaryImportButton, glossaryRemoveButton}) {
+            glossaryButtons.addView(button, new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        }
+        parent.addView(glossaryButtons, matchWrap());
+        TextView glossaryHint = new TextView(this);
+        glossaryHint.setTextSize(12f);
+        glossaryHint.setText(R.string.hint_glossary);
+        parent.addView(glossaryHint, matchWrap());
+        showGlossary(glossaryDraft);
+        glossarySpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (loadingUi || !glossarySpinner.isEnabled() || position < 0
+                        || position > glossaryDraft.packs().size()
+                        || position != glossarySpinner.getSelectedItemPosition()) {
+                    return;
+                }
+                String name = position == 0 ? null : glossaryDraft.packs().get(position - 1).name;
+                if (!Objects.equals(name, glossaryDraft.activeName())) {
+                    glossaryDraft = glossaryDraft.select(name);
+                    markDirty();
+                    updateSaveButtonState();
+                }
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+                // Selection is always present when the adapter has been populated.
+            }
+        });
+    }
+
+    private CheckBox addOption(LinearLayout parent, int label) {
+        CheckBox input = new CheckBox(this);
+        input.setText(label);
+        input.setMinimumHeight(dp(48));
+        input.setOnCheckedChangeListener((button, checked) -> markDirty());
+        parent.addView(input, matchWrap());
+        return input;
+    }
+
+    private void showGlossary(GlossaryLibrary library) {
+        glossaryDraft = library;
+        List<String> names = new ArrayList<>();
+        names.add(getString(R.string.glossary_disabled));
+        int position = 0;
+        for (GlossaryLibrary.Pack pack : library.packs()) {
+            names.add(getString(R.string.glossary_entry, pack.name, pack.terms.size()));
+            if (pack.name.equals(library.activeName())) {
+                position = names.size() - 1;
+            }
+        }
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, names);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        glossarySpinner.setAdapter(adapter);
+        glossarySpinner.setSelection(position);
+    }
+
+    private boolean canEditGlossary() {
+        return started && !destroyed && configurationLoaded && !persistedConfigInvalid
+                && !persistence.isLoading() && !saveInProgress && !syncInProgress && !importingGlossary;
+    }
+
+    @SuppressWarnings("deprecation") // This platform Activity does not use an AndroidX ActivityResultRegistry.
+    private void pickGlossary() {
+        if (!canEditGlossary()) {
+            return;
+        }
+        Intent document = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("*/*")
+                .putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                        "application/json", "text/plain", "application/octet-stream"});
+        try {
+            startActivityForResult(document, PICK_GLOSSARY);
+        } catch (ActivityNotFoundException failure) {
+            toast(getString(R.string.glossary_import_unavailable));
+        }
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != PICK_GLOSSARY || resultCode != RESULT_OK || data == null
+                || data.getData() == null || importingGlossary) {
+            return;
+        }
+        Uri uri = data.getData();
+        if (!"content".equals(uri.getScheme())) {
+            toast(getString(R.string.glossary_import_failed));
+            return;
+        }
+        importingGlossary = true;
+        updateSaveButtonState();
+        saveExecutor.execute(() -> {
+            final GlossaryLibrary.Pack pack;
+            try (InputStream input = getContentResolver().openInputStream(uri)) {
+                if (input == null) {
+                    throw new IOException("No document stream");
+                }
+                pack = GlossaryLibrary.readPack(input);
+            } catch (IOException | RuntimeException failure) {
+                persistence.post(() -> finishGlossaryImport(null));
+                return;
+            }
+            persistence.post(() -> finishGlossaryImport(pack));
+        });
+    }
+
+    private void finishGlossaryImport(@Nullable GlossaryLibrary.Pack pack) {
+        importingGlossary = false;
+        try {
+            if (pack == null || persistedConfigInvalid || !configurationLoaded) {
+                toast(getString(R.string.glossary_import_failed));
+                return;
+            }
+            showGlossary(glossaryDraft.addAndSelect(pack));
+            markDirty();
+            toast(getString(R.string.glossary_import_complete));
+        } catch (IllegalArgumentException failure) {
+            toast(getString(R.string.glossary_import_conflict));
+        } finally {
+            updateSaveButtonState();
+        }
+    }
+
+    private void confirmRemoveGlossary() {
+        String selected = glossaryDraft.activeName();
+        if (!canEditGlossary() || selected == null) {
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setMessage(getString(R.string.glossary_remove_message, selected))
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(R.string.button_remove_glossary, (dialog, which) -> {
+                    if (canEditGlossary() && selected.equals(glossaryDraft.activeName())) {
+                        showGlossary(glossaryDraft.removeActive());
+                        markDirty();
+                        updateSaveButtonState();
+                    }
+                })
+                .show();
+    }
+
     /** Shared by the button and entry, including lifecycle and persistence exclusion. */
     private boolean canOpenScopeEditor() {
         return started && !destroyed && configurationLoaded && !persistedConfigInvalid
@@ -682,14 +891,9 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
             public void afterTextChanged(Editable s) {
             }
         };
-        urlInput.addTextChangedListener(watcher);
-        keyInput.addTextChangedListener(watcher);
-        modelInput.addTextChangedListener(watcher);
-        headersInput.addTextChangedListener(watcher);
-        systemPromptInput.addTextChangedListener(watcher);
-        timeoutInput.addTextChangedListener(watcher);
-        concurrencyInput.addTextChangedListener(watcher);
-        testTextInput.addTextChangedListener(watcher);
+        for (EditText field : configurationFields()) {
+            field.addTextChangedListener(watcher);
+        }
     }
 
     private void markDirty() {
@@ -760,7 +964,7 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
 
     private EditText[] configurationFields() {
         return new EditText[] {urlInput, keyInput, modelInput, headersInput,
-                systemPromptInput, timeoutInput, concurrencyInput, testTextInput};
+                systemPromptInput, timeoutInput, concurrencyInput, testTextInput, contextCharactersInput};
     }
 
     /** 无效快照的占位值不是用户保存的设置；锁定页面直到用户明确重置。 */
@@ -776,6 +980,11 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
             enabledInput.setChecked(false);
             scopeDraft = TranslationScope.ALL;
             scopeSummary.setText("");
+            messageTarget.setChecked(false);
+            serverNameTarget.setChecked(false);
+            channelNameTarget.setChecked(false);
+            contextEnabledInput.setChecked(false);
+            showGlossary(GlossaryLibrary.EMPTY);
             loggingInput.setChecked(false);
             streamingInput.setChecked(false);
             protocolSpinner.setSelection(AdapterView.INVALID_POSITION);
@@ -849,6 +1058,13 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
             enabledInput.setChecked(snapshot.enabled);
             scopeDraft = snapshot.translationScope;
             updateScopeSummary();
+            messageTarget.setChecked(snapshot.translateMessages);
+            serverNameTarget.setChecked(snapshot.translateServerNames);
+            channelNameTarget.setChecked(snapshot.translateChannelNames);
+            contextEnabledInput.setChecked(snapshot.contextEnabled);
+            setTextOrPlaceholder(contextCharactersInput, Integer.toString(snapshot.contextCharacters),
+                    Integer.toString(Config.DEF_CONTEXT_CHARACTERS));
+            showGlossary(snapshot.glossaryLibrary);
             loggingInput.setChecked(snapshot.loggingEnabled);
             protocolSpinner.setSelection(positionOf(snapshot.protocol));
             streamingInput.setChecked(snapshot.streaming);
@@ -878,7 +1094,8 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
             updateStatus(getString(R.string.status_invalid_saved_config));
             return;
         }
-        if (!configurationLoaded || persistence.isLoading() || saveInProgress || syncInProgress) {
+        if (!configurationLoaded || persistence.isLoading() || saveInProgress
+                || syncInProgress || importingGlossary) {
             return;
         }
         if (!started || destroyed || prefs == null) {
@@ -1046,7 +1263,7 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
 
     private void updateSaveButtonState() {
         boolean available = started && !destroyed && prefs != null && configurationLoaded
-                && !persistence.isLoading() && !saveInProgress && !syncInProgress;
+                && !persistence.isLoading() && !saveInProgress && !syncInProgress && !importingGlossary;
         boolean formAvailable = configurationLoaded && !persistedConfigInvalid;
         if (saveButton != null) {
             saveButton.setEnabled(available && !persistedConfigInvalid);
@@ -1068,6 +1285,14 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
         for (EditText field : configurationFields()) {
             field.setEnabled(formAvailable);
         }
+        messageTarget.setEnabled(formAvailable);
+        serverNameTarget.setEnabled(formAvailable);
+        channelNameTarget.setEnabled(formAvailable);
+        contextEnabledInput.setEnabled(formAvailable);
+        boolean glossaryAvailable = canEditGlossary();
+        glossarySpinner.setEnabled(glossaryAvailable && !glossaryDraft.packs().isEmpty());
+        glossaryImportButton.setEnabled(glossaryAvailable);
+        glossaryRemoveButton.setEnabled(glossaryAvailable && glossaryDraft.activeName() != null);
         updateStreamingAvailability();
         setTestButtonsEnabled(testFuture == null);
     }
@@ -1107,6 +1332,19 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
         MemoryPrefs memoryPrefs = new MemoryPrefs();
         memoryPrefs.put(Config.KEY_ENABLED, enabledInput.isChecked());
         memoryPrefs.put(Config.KEY_TRANSLATION_SCOPE, scopeDraft.toJson());
+        memoryPrefs.put(Config.KEY_TRANSLATE_MESSAGES, messageTarget.isChecked());
+        memoryPrefs.put(Config.KEY_TRANSLATE_SERVER_NAMES, serverNameTarget.isChecked());
+        memoryPrefs.put(Config.KEY_TRANSLATE_CHANNEL_NAMES, channelNameTarget.isChecked());
+        memoryPrefs.put(Config.KEY_CONTEXT_ENABLED, contextEnabledInput.isChecked());
+        Object context = parseIntInput(contextCharactersInput, Config.DEF_CONTEXT_CHARACTERS);
+        if (!(context instanceof Integer) || (Integer) context < Config.MIN_CONTEXT_CHARACTERS
+                || (Integer) context > Config.MAX_CONTEXT_CHARACTERS) {
+            contextCharactersInput.setError(getString(R.string.error_context_characters,
+                    Config.MIN_CONTEXT_CHARACTERS, Config.MAX_CONTEXT_CHARACTERS));
+            return Config.invalidSnapshot();
+        }
+        memoryPrefs.put(Config.KEY_CONTEXT_CHARACTERS, context);
+        memoryPrefs.put(Config.KEY_GLOSSARY_LIBRARY, glossaryDraft.toJson());
         memoryPrefs.put(Config.KEY_LOGGING_ENABLED, loggingInput.isChecked());
         memoryPrefs.put(Config.KEY_PROTOCOL,
                 protocolAt(protocolSpinner.getSelectedItemPosition()));
@@ -1131,7 +1369,7 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
             return;
         }
         if (!started || destroyed || !configurationLoaded || persistence.isLoading()
-                || saveInProgress || syncInProgress || testFuture != null) {
+                || saveInProgress || syncInProgress || importingGlossary || testFuture != null) {
             return;
         }
         showResult(ApiTester.selfCheck(snapshotFromUi()));
@@ -1145,7 +1383,7 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
     private void runTestTranslation(boolean connectionTest) {
         if (!started || destroyed || !configurationLoaded || persistence.isLoading()
                 || persistedConfigInvalid || saveInProgress || syncInProgress
-                || testFuture != null) {
+                || importingGlossary || testFuture != null) {
             return;
         }
         Config.Snapshot snapshot = snapshotFromUi();
@@ -1248,7 +1486,7 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
     private void setTestButtonsEnabled(boolean enabled) {
         enabled = enabled && started && !destroyed && configurationLoaded
                 && !persistence.isLoading() && !persistedConfigInvalid
-                && !saveInProgress && !syncInProgress;
+                && !saveInProgress && !syncInProgress && !importingGlossary;
         if (configCheckButton != null) {
             configCheckButton.setEnabled(enabled);
         }

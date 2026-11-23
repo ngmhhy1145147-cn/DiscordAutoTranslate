@@ -26,7 +26,7 @@ public final class Scheduler {
 
     /** Implementations must return promptly when interrupted or cancelled. */
     public interface Engine {
-        String translate(String text) throws Exception;
+        String translate(String text, @Nullable String precedingContext) throws Exception;
 
         /** Cancel the request currently bound to this worker. */
         default void cancel(Thread worker) {
@@ -176,6 +176,7 @@ public final class Scheduler {
         final TranslationTaskId id;
         final TaskKey key;
         final String text;
+        @Nullable final String precedingContext;
         final Engine engine;
         final Acceptance acceptance;
         final Callback callback;
@@ -184,10 +185,12 @@ public final class Scheduler {
         boolean delivered;
         volatile boolean obsolete;
 
-        Task(TranslationTaskId id, String text, Engine engine, Acceptance acceptance, Callback callback) {
+        Task(TranslationTaskId id, String text, @Nullable String precedingContext, Engine engine,
+             Acceptance acceptance, Callback callback) {
             this.id = id;
             this.key = new TaskKey(id);
             this.text = text;
+            this.precedingContext = precedingContext;
             this.engine = engine;
             this.acceptance = acceptance;
             this.callback = callback;
@@ -281,12 +284,17 @@ public final class Scheduler {
      */
     public void submit(TranslationTaskId taskId, String text, Engine engine,
                        Acceptance accept, Callback callback) {
+        submit(taskId, text, null, engine, accept, callback);
+    }
+
+    public void submit(TranslationTaskId taskId, String text, @Nullable String precedingContext,
+                       Engine engine, Acceptance accept, Callback callback) {
         Objects.requireNonNull(taskId, "taskId");
         Objects.requireNonNull(text, "text");
         Objects.requireNonNull(engine, "engine");
         Objects.requireNonNull(accept, "accept");
         Objects.requireNonNull(callback, "callback");
-        Task task = new Task(taskId, text, engine, accept, callback);
+        Task task = new Task(taskId, text, precedingContext, engine, accept, callback);
         boolean queueFull;
         List<Task> obsoletePending = new ArrayList<>();
         List<Runnable> rejectedResults = new ArrayList<>();
@@ -374,7 +382,7 @@ public final class Scheduler {
             if (shutdown || Thread.currentThread().isInterrupted()) {
                 throw new TranslationException(TranslationException.Kind.CANCELLED, "任务已取消");
             }
-            result = task.engine.translate(task.text);
+            result = task.engine.translate(task.text, task.precedingContext);
         } catch (Throwable t) {
             error = t;
         } finally {

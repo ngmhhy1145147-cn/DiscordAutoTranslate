@@ -34,6 +34,15 @@ public final class EnglishDetector {
     /** Evaluate extractable prose; retained native nodes never veto surrounding text. */
     public static Verdict evaluate(@Nullable String rawText, int textNodeCount,
                                    @Nullable String targetLanguage) {
+        return evaluate(rawText, textNodeCount, targetLanguage, MIN_LETTERS);
+    }
+
+    public static Verdict evaluateLabel(@Nullable String label, @Nullable String targetLanguage) {
+        return evaluate(label, 1, targetLanguage, 1);
+    }
+
+    private static Verdict evaluate(@Nullable String rawText, int textNodeCount,
+                                    @Nullable String targetLanguage, int minimumLetters) {
         if (rawText == null || rawText.trim().isEmpty()) {
             return new Verdict(false, Reason.EMPTY);
         }
@@ -77,7 +86,7 @@ public final class EnglishDetector {
         if (nonSpace == 0) {
             return new Verdict(false, Reason.NO_VISIBLE_CONTENT);
         }
-        if (letters < MIN_LETTERS) {
+        if (letters < minimumLetters) {
             return new Verdict(false, Reason.TOO_FEW_LETTERS);
         }
         float letterRatio = (float) letters / nonSpace;

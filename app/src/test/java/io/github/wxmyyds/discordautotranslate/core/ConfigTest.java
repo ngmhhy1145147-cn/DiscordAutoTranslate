@@ -51,6 +51,46 @@ public class ConfigTest {
         assertEquals(Config.DEF_PROTOCOL, s.protocol);
         assertEquals(Config.DEF_TIMEOUT_MS, s.timeoutMs);
         assertEquals(Config.DEF_MAX_CONCURRENCY, s.maxConcurrency);
+        assertTrue(s.translateMessages);
+        assertFalse(s.translateServerNames);
+        assertFalse(s.translateChannelNames);
+        assertFalse(s.contextEnabled);
+        assertEquals(100, s.contextCharacters);
+        assertTrue(s.glossary.isEmpty());
+    }
+
+    @Test
+    public void translationOptionsInvalidateOnlyWhenTheyChangeRequestBehavior() {
+        Config.Snapshot defaults = Config.read(null);
+        Config.Snapshot saved = Config.read(new MemoryPrefs()
+                .put(Config.KEY_TRANSLATE_MESSAGES, false)
+                .put(Config.KEY_TRANSLATE_SERVER_NAMES, true)
+                .put(Config.KEY_TRANSLATE_CHANNEL_NAMES, true)
+                .put(Config.KEY_CONTEXT_ENABLED, true)
+                .put(Config.KEY_CONTEXT_CHARACTERS, 175));
+        assertTrue(saved.isUsable());
+        assertFalse(saved.translateMessages);
+        assertTrue(saved.translateServerNames);
+        assertTrue(saved.translateChannelNames);
+        assertTrue(saved.contextEnabled);
+        assertEquals(175, saved.contextCharacters);
+        assertNotEquals(defaults.version(), saved.version());
+        assertEquals(defaults.version(), Config.read(new MemoryPrefs()
+                .put(Config.KEY_CONTEXT_CHARACTERS, 175)).version());
+        assertNotEquals(defaults.version(), Config.read(new MemoryPrefs()
+                .put(Config.KEY_CONTEXT_ENABLED, true)).version());
+    }
+
+    @Test
+    public void rejectsOutOfRangeContextAndWrongTargetTypes() {
+        for (Object invalid : new Object[]{0, -1, 1001, "100"}) {
+            assertFalse(Config.read(new MemoryPrefs()
+                    .put(Config.KEY_CONTEXT_CHARACTERS, invalid)).isUsable());
+        }
+        assertFalse(Config.read(new MemoryPrefs()
+                .put(Config.KEY_TRANSLATE_SERVER_NAMES, "true")).isUsable());
+        assertFalse(Config.read(new MemoryPrefs()
+                .put(Config.KEY_GLOSSARY_LIBRARY, "{\"active\":\"Missing\",\"packs\":[]}")).isUsable());
     }
 
     @Test

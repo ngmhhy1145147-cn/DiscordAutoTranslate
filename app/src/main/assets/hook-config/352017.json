@@ -44,6 +44,42 @@
     }
   },
   "hooks": {
+    "name.voiceOverlay": {
+      "target": {
+        "class": "com.discord.mobile_voice_overlay.views.OverlayMenuView",
+        "name": "setData",
+        "static": false,
+        "parameterCount": 1,
+        "returnType": "void",
+        "parameterTypes": {"0": "ie.m"}
+      },
+      "viewArgument": -1,
+      "viewPath": [],
+      "modelArgument": 0,
+      "modelPath": [],
+      "guildIdPath": ["c", "d"],
+      "channelIdPath": ["d"],
+      "serverViewId": 2131362649,
+      "channelViewId": 2131362645
+    },
+    "name.voiceChannelSelector": {
+      "target": {
+        "class": "le.m",
+        "name": "f",
+        "static": false,
+        "parameterCount": 2,
+        "returnType": "void",
+        "parameterTypes": {"0": "k3.k1", "1": "int"}
+      },
+      "viewArgument": 0,
+      "viewPath": ["a"],
+      "modelArgument": 0,
+      "modelPath": ["w"],
+      "guildIdPath": ["a"],
+      "channelIdPath": ["b"],
+      "serverViewId": 2131362350,
+      "channelViewId": 2131362045
+    },
     "message.bind": {
       "target": {
         "class": "com.discord.chat.presentation.message.MessageView",

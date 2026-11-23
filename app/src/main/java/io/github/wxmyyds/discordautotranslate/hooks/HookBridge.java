@@ -49,6 +49,7 @@ public final class HookBridge {
 
     /** Bounded server/channel locations; only native message row bindings own these records. */
     private final Map<String, MessageLocation> messageLocations = boundedMap(512);
+    private final MessageContext messageContext = new MessageContext();
 
     void rememberMessageLocation(String messageId, MessageLocation location) {
         messageLocations.put(messageId, location);
@@ -56,11 +57,13 @@ public final class HookBridge {
 
     void forgetMessageLocation(String messageId) {
         messageLocations.remove(messageId);
+        messageContext.forget(messageId);
     }
 
     /** One gate for bodies, Embed/Poll slots, retries and async ownership. Unknown location is denied. */
     boolean translationAllowed(String key, Config.Snapshot snapshot) {
-        if (!snapshot.enabled || snapshot.configError != null) return false;
+        if (!snapshot.enabled || !snapshot.translateMessages
+                || snapshot.configError != null) return false;
         MessageLocation location = messageLocations.get(cardRowOf(key));
         return location != null && snapshot.translationScope.allows(location.guildId, location.channelId);
     }
@@ -124,8 +127,25 @@ public final class HookBridge {
     /** 按引用身份反查消息 ID；Discord StructurableText 的 equals() 是按内容比较。 */
     private final IdentityMessageMap contentIdentityToMessageId = new IdentityMessageMap();
 
-    private volatile Config.Snapshot config = Config.read(null);
-    private volatile Scheduler.Engine engine = new JsonApiEngine(config);
+    static final class TranslationConfiguration {
+        final Config.Snapshot snapshot;
+        final Scheduler.Engine engine;
+
+        TranslationConfiguration(Config.Snapshot snapshot, Scheduler.Engine engine) {
+            this.snapshot = snapshot;
+            this.engine = engine;
+        }
+    }
+
+    private static TranslationConfiguration configure(Config.Snapshot snapshot) {
+        return new TranslationConfiguration(snapshot, new JsonApiEngine(snapshot));
+    }
+
+    private volatile TranslationConfiguration configuration = configure(Config.read(null));
+
+    TranslationConfiguration translationConfiguration() {
+        return configuration;
+    }
 
     private HookBridge() {
     }
@@ -141,21 +161,20 @@ public final class HookBridge {
         if (c == null) {
             return;
         }
-        Config.Snapshot old = this.config;
-        this.config = c;
-
-        // 并发上限即时生效（需求 §5.7 普通配置变更尽量即时生效）。
-        Scheduler.get().setMaxConcurrency(c.maxConcurrency);
+        Config.Snapshot old = configuration.snapshot;
+        configuration = configure(c);
 
         // version() 已包含密钥/额外请求头指纹：凭据变更同样会使缓存与在途结果失效。
-        if (old == null || !old.version().equals(c.version())
-                || !old.translationScope.sameMatchingPolicy(c.translationScope)) {
+        boolean invalidate = !old.version().equals(c.version())
+                || !old.translationScope.sameMatchingPolicy(c.translationScope);
+        if (invalidate || old.enabled != c.enabled) messageContext.clear();
+        if (invalidate) {
             StateStore.get().onNewGeneration();
             TranslationCache.get().clear();
             CardState.clear();
         }
-        // 引擎随配置重建，保证下一次请求使用最新配置。
-        this.engine = new JsonApiEngine(c);
+        // Dispatch newly admitted work only after configuration, state, and engine agree.
+        Scheduler.get().setMaxConcurrency(c.maxConcurrency);
     }
 
     // ---------------------------------------------------------------- 视图映射
@@ -201,6 +220,7 @@ public final class HookBridge {
         viewToMessageId.clear();
         messageRevisions.clear();
         messageLocations.clear();
+        messageContext.clear();
         contentIdentityToMessageId.clear();
         CardState.clear();
     }
@@ -277,9 +297,11 @@ public final class HookBridge {
         if (!looksLikeSnowflake(rowMessageId)) throw new IllegalArgumentException("Invalid Embed row identity");
         java.util.List<String> hashes = new java.util.ArrayList<>(texts.size());
         StringBuilder identity = new StringBuilder();
+        Config.Snapshot snapshot = configuration.snapshot;
         for (Object text : texts) {
             TextExtractor.Result ex = TextExtractor.extract(text);
-            String hash = ex == null || ex.text.trim().isEmpty() ? null : contentHashOf(ex, config);
+            String hash = ex == null || ex.text.trim().isEmpty() ? null
+                    : contentHashOf(ex, snapshot, "");
             hashes.add(hash);
             identity.append(hash == null ? "EMPTY" : hash).append('\u0000');
         }
@@ -306,7 +328,8 @@ public final class HookBridge {
     StateStore.Entry matchingState(String key, @Nullable TextExtractor.Result extracted) {
         StateStore.Entry entry = StateStore.get().peek(key);
         return entry != null && extracted != null
-                && contentHashOf(extracted, config).equals(entry.contentHash) ? entry : null;
+                && contentHashOf(extracted, configuration.snapshot, entry.contextHash)
+                        .equals(entry.contentHash) ? entry : null;
     }
 
     /** Poll question/answer slots share the same hash, scheduler and state pipeline. */
@@ -319,7 +342,7 @@ public final class HookBridge {
         TextExtractor.Result ex = TextExtractor.extract(structurable);
         return ex == null || ex.text.trim().isEmpty() ? null
                 : stateKey(rowMessageId, POLL_KEY_PREFIX + slot + "\u0000",
-                        contentHashOf(ex, config));
+                        contentHashOf(ex, configuration.snapshot, ""));
     }
 
     static boolean isPollKey(@Nullable String key) {
@@ -352,9 +375,9 @@ public final class HookBridge {
 
     /** Scope also gates consuming retained/cached results; the existing global-off display contract stays. */
     boolean scopeAllowsDisplay(String key) {
-        Config.Snapshot snapshot = config;
+        Config.Snapshot snapshot = configuration.snapshot;
         MessageLocation location = messageLocations.get(cardRowOf(key));
-        return snapshot.configError == null && location != null
+        return snapshot.configError == null && snapshot.translateMessages && location != null
                 && snapshot.translationScope.allows(location.guildId, location.channelId);
     }
 
@@ -369,9 +392,10 @@ public final class HookBridge {
     }
 
     /** 与 {@link #onMessageBound} 同口径的内容哈希（含多片段缓存命名空间）。 */
-    private static String contentHashOf(TextExtractor.Result ex, Config.Snapshot cfg) {
+    private static String contentHashOf(TextExtractor.Result ex, Config.Snapshot cfg, String contextHash) {
         String hashInput = ex.segmentCount >= 2 ? ex.text + SEGMENT_CACHE_SUFFIX : ex.text;
-        return Scheduler.contentHash(hashInput, cfg.version());
+        String sourceHash = Scheduler.contentHash(hashInput, cfg.version());
+        return contextHash.isEmpty() ? sourceHash : Scheduler.contentHash(sourceHash, contextHash);
     }
 
     /**
@@ -412,7 +436,8 @@ public final class HookBridge {
             return;
         }
 
-        Config.Snapshot cfg = config;
+        TranslationConfiguration runtime = configuration;
+        Config.Snapshot cfg = runtime.snapshot;
         if (!cfg.enabled) {
             ProjectLog.warnOnce("translation.disabled", "translation skipped: auto-translate is disabled");
             return;
@@ -421,11 +446,16 @@ public final class HookBridge {
             ProjectLog.infoOnce("translation.scopeDenied", "translation skipped: translation scope denied");
             return;
         }
-        // The single captured request keeps style ranges and retained-node anchors.
-        // The segment suffix is only a cache namespace, not another request protocol.
-        String requestText = ex.text;
-        String hash = contentHashOf(ex, cfg);
-        StateStore.Entry entry = StateStore.get().obtain(messageId, hash);
+        // Only a canonical body may add preceding reference text. Card slots and reply
+        // projections retain their original request/display ownership.
+        MessageLocation location = cfg.contextEnabled && !isCardKey(messageId)
+                ? messageLocations.get(messageId) : null;
+        String context = location == null ? null
+                : messageContext.capture(messageId, location, ex.text, cfg.contextCharacters);
+        String contextHash = context == null || context.isEmpty()
+                ? "" : Scheduler.contentHash(context, "preceding context");
+        String hash = contentHashOf(ex, cfg, contextHash);
+        StateStore.Entry entry = StateStore.get().obtain(messageId, hash, contextHash);
         rememberCanonicalContent(messageId, structurableText);
         if (entry.status == StateStore.Status.TRANSLATING
                 || entry.status == StateStore.Status.TRANSLATED) {
@@ -459,8 +489,9 @@ public final class HookBridge {
         TranslationTaskId task = StateStore.get().begin(entry);
         if (task == null) return;
         refreshTranslation(messageId);
-        Scheduler.get().submit(task, requestText, engine,
-                identity -> HookRuntime.isActive() && translationAllowed(identity.messageId, config)
+        Scheduler.get().submit(task, ex.text, context, runtime.engine,
+                identity -> HookRuntime.isActive()
+                        && translationAllowed(identity.messageId, configuration.snapshot)
                         && StateStore.get().owns(identity),
                 (identity, accepted, translated, error) -> {
                     try (HookRuntime.Lease lease = HookRuntime.enter()) {
@@ -479,7 +510,7 @@ public final class HookBridge {
                         ? ((TranslationException) error).kind().name() : "none")
                 + " causeClass=" + (error == null || error.getCause() == null
                         ? "none" : error.getCause().getClass().getSimpleName()));
-        boolean admitted = accepted && translationAllowed(task.messageId, config);
+        boolean admitted = accepted && translationAllowed(task.messageId, configuration.snapshot);
         boolean success = admitted && error == null && translated != null && !translated.isEmpty();
         if (!StateStore.get().complete(task, admitted, translated,
                 success ? null : admitted ? describe(error) : null)) return;
@@ -572,7 +603,7 @@ public final class HookBridge {
 
     /** 失败后重试：由图标点击触发（需求 §2.6）。 */
     public void retry(String messageId) {
-        if (!HookRuntime.isActive() || !translationAllowed(messageId, config)) return;
+        if (!HookRuntime.isActive() || !translationAllowed(messageId, configuration.snapshot)) return;
         StateStore.Entry e = StateStore.get().peek(messageId);
         if (e == null) {
             return;

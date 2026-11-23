@@ -27,6 +27,35 @@ public class ConfigurationSyncTest {
     private static final String INITIALIZED = "settings_initialized";
 
     @Test
+    public void savesAndRestoresNewOptionsThroughTheExistingSyncTransaction() {
+        FakePrefs local = localBeforeImport();
+        FakePrefs remote = remoteValues();
+        Config.Snapshot draft = Config.read(new MemoryPrefs()
+                .put(Config.KEY_TRANSLATE_MESSAGES, false)
+                .put(Config.KEY_TRANSLATE_SERVER_NAMES, true)
+                .put(Config.KEY_TRANSLATE_CHANNEL_NAMES, true)
+                .put(Config.KEY_CONTEXT_ENABLED, true)
+                .put(Config.KEY_CONTEXT_CHARACTERS, 250)
+                .put(Config.KEY_GLOSSARY_LIBRARY,
+                        "{\"active\":\"Games\",\"packs\":[{\"name\":\"Games\",\"terms\":[[\"cd\",\"冷却\"]]}]}"));
+        local.outcomes.add(true);
+        remote.outcomes.add(true);
+
+        assertTrue(ConfigurationSync.save(local.prefs, remote.prefs, draft).succeeded());
+        Config.Snapshot stored = ConfigurationSync.loadLocal(local.prefs).snapshot;
+        Config.Snapshot synced = Config.read(remote.prefs);
+        assertEquals(draft.version(), stored.version());
+        assertEquals(draft.version(), synced.version());
+        assertEquals("Games", synced.glossaryLibrary.activeName());
+        assertEquals("冷却", synced.glossary.get("cd"));
+        assertEquals(250, synced.contextCharacters);
+        assertTrue(synced.contextEnabled);
+        assertTrue(synced.translateServerNames);
+        assertTrue(synced.translateChannelNames);
+        assertFalse(synced.translateMessages);
+    }
+
+    @Test
     public void scopeUsesTheSameImportSaveAndRemoteTransactionChain() {
         assertTrue(ConfigurationSync.CONFIG_KEYS.contains(Config.KEY_TRANSLATION_SCOPE));
         TranslationScope scope = new TranslationScope(false, java.util.Collections.singletonList(

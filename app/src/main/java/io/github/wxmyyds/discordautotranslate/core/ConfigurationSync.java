@@ -15,7 +15,9 @@ public final class ConfigurationSync {
             Config.KEY_API_KEY, Config.KEY_MODEL,
             Config.KEY_TARGET_LANG, Config.KEY_EXTRA_HEADERS, Config.KEY_SYSTEM_PROMPT,
             Config.KEY_PROTOCOL, Config.KEY_STREAMING, Config.KEY_TIMEOUT_MS,
-            Config.KEY_MAX_CONCURRENCY));
+            Config.KEY_MAX_CONCURRENCY, Config.KEY_TRANSLATE_MESSAGES,
+            Config.KEY_TRANSLATE_SERVER_NAMES, Config.KEY_TRANSLATE_CHANNEL_NAMES,
+            Config.KEY_CONTEXT_ENABLED, Config.KEY_CONTEXT_CHARACTERS, Config.KEY_GLOSSARY_LIBRARY));
     private static final String KEY_LOCAL_INITIALIZED = "settings_initialized";
     private static final String[] LOCAL_COMMIT_KEYS = localCommitKeys();
 
@@ -212,6 +214,19 @@ public final class ConfigurationSync {
             raw.put(Config.KEY_LOGGING_ENABLED, snapshot.loggingEnabled);
             if (!TranslationScope.ALL.equals(snapshot.translationScope)) {
                 raw.put(Config.KEY_TRANSLATION_SCOPE, snapshot.translationScope.toJson());
+            }
+            putUnlessDefault(raw, Config.KEY_TRANSLATE_MESSAGES,
+                    snapshot.translateMessages, Config.DEF_TRANSLATE_MESSAGES);
+            putUnlessDefault(raw, Config.KEY_TRANSLATE_SERVER_NAMES,
+                    snapshot.translateServerNames, Config.DEF_TRANSLATE_SERVER_NAMES);
+            putUnlessDefault(raw, Config.KEY_TRANSLATE_CHANNEL_NAMES,
+                    snapshot.translateChannelNames, Config.DEF_TRANSLATE_CHANNEL_NAMES);
+            putUnlessDefault(raw, Config.KEY_CONTEXT_ENABLED,
+                    snapshot.contextEnabled, Config.DEF_CONTEXT_ENABLED);
+            putUnlessDefault(raw, Config.KEY_CONTEXT_CHARACTERS,
+                    snapshot.contextCharacters, Config.DEF_CONTEXT_CHARACTERS);
+            if (!snapshot.glossaryLibrary.packs().isEmpty()) {
+                raw.put(Config.KEY_GLOSSARY_LIBRARY, snapshot.glossaryLibrary.toJson());
             }
             raw.put(Config.KEY_PROTOCOL, snapshot.protocol);
             raw.put(Config.KEY_STREAMING, snapshot.streaming);

@@ -139,6 +139,21 @@ public class SettingsActivityTest {
     }
 
     @Test
+    public void glossaryInspectionAndEditsRequireAReadyDraft() throws Exception {
+        SettingsActivity page = new SettingsActivity();
+        set(page, "started", true);
+        set(page, "configurationLoaded", true);
+        assertEquals(Boolean.TRUE, invoke(page, "canEditGlossary", new Class<?>[0]));
+
+        for (String flag : new String[]{"destroyed", "persistedConfigInvalid",
+                "saveInProgress", "syncInProgress", "importingGlossary"}) {
+            set(page, flag, true);
+            assertEquals(flag, Boolean.FALSE, invoke(page, "canEditGlossary", new Class<?>[0]));
+            set(page, flag, false);
+        }
+    }
+
+    @Test
     public void failedSaveCannotEnableDraftLoggingOrExposeExceptionContent() throws Exception {
         Config.Snapshot draft = loggingSnapshot(true);
         record("save", syncResult(ConfigurationSync.Direction.SAVE,

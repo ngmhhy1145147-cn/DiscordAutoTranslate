@@ -24,6 +24,7 @@ import io.github.wxmyyds.discordautotranslate.hooks.InlineIconSpan;
 import io.github.wxmyyds.discordautotranslate.hooks.RerenderRegistry;
 import io.github.wxmyyds.discordautotranslate.hooks.StructurableTextFactory;
 import io.github.wxmyyds.discordautotranslate.hooks.MessageHooks;
+import io.github.wxmyyds.discordautotranslate.hooks.NameHooks;
 import io.github.wxmyyds.discordautotranslate.hooks.PollHooks;
 import io.github.wxmyyds.discordautotranslate.hooks.RenderDispatcher;
 import io.github.wxmyyds.discordautotranslate.hooks.HookRuntime;
@@ -263,6 +264,7 @@ public class ModuleEntry extends XposedModule {
             MessageHooks.install(this, cl, config, installedHookIds, hooks);
             EmbedHooks.install(this, cl, config, installedHookIds, hooks);
             PollHooks.install(this, cl, config, installedHookIds, hooks);
+            NameHooks.install(this, cl, config, installedHookIds, hooks);
             if (!config.hasAllRequiredHooks(installedHookIds)) {
                 throw new IllegalStateException("incomplete configured hook installation");
             }
@@ -323,6 +325,9 @@ public class ModuleEntry extends XposedModule {
             // A fresh generation with no spans must confirm success even before handler installation.
             if (!InlineIconSpan.resetAll(2000L)) {
                 throw new IllegalStateException("Inline icon cleanup incomplete; restart Discord required");
+            }
+            if (!NameHooks.reset(2000L)) {
+                throw new IllegalStateException("Name translation cleanup incomplete; restart Discord required");
             }
             int failures = HookCleanup.remove(hooks, XposedInterface.HookHandle::unhook);
             if (failures != 0) {

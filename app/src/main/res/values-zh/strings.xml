@@ -143,4 +143,24 @@
     <string name="scope_error_action">请选择翻译或不翻译</string>
     <string name="scope_explanation">频道规则优先于服务器规则，再使用默认策略。删除规则即继承。全局关闭阻止新翻译。“应用”仅更新草稿，之后请保存、同步设置并重启 Discord。在 Discord 开发者模式中复制服务器或频道 ID 后添加规则。</string>
     <string name="scope_summary">%1$s · %2$d 条服务器规则 · %3$d 条频道规则</string>
+
+    <string name="label_translation_targets">翻译对象</string>
+    <string name="target_message_body">消息内容</string>
+    <string name="target_server_names">服务器名称</string>
+    <string name="target_channel_names">频道名称</string>
+    <string name="label_context_mode">精翻模式</string>
+    <string name="label_context_characters">上下文字符上限</string>
+    <string name="hint_context_mode">在翻译范围允许的频道或私信内，将先前已显示的消息作为上下文发送给翻译服务。</string>
+    <string name="error_context_characters">请输入 %1$d 到 %2$d 之间的整数。</string>
+    <string name="label_glossary">术语包</string>
+    <string name="glossary_disabled">不使用术语包</string>
+    <string name="glossary_entry">%1$s（%2$d 条）</string>
+    <string name="button_import_glossary">导入术语包</string>
+    <string name="button_remove_glossary">移除术语包</string>
+    <string name="hint_glossary">保存后使用所选术语包。导入 UTF-8 JSON 文件，例如 {\"name\":\"游戏\",\"terms\":[[\"cooldown\",\"冷却时间\"]]}。</string>
+    <string name="glossary_import_unavailable">无法打开 Android 文件选择器。</string>
+    <string name="glossary_import_failed">无法读取有效的 UTF-8 术语包 JSON 文件。</string>
+    <string name="glossary_import_conflict">术语包名称已存在，或已达到术语包存储上限。</string>
+    <string name="glossary_import_complete">术语包已导入当前草稿。</string>
+    <string name="glossary_remove_message">从当前草稿移除 %1$s？</string>
 </resources>

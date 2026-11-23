@@ -11,6 +11,8 @@ public final class StateStore {
 
     public static final class Entry {
         public final String messageId;
+        /** Reference-context fingerprint; the repository never retains the source excerpt. */
+        public final String contextHash;
         public volatile String contentHash;
         public volatile String translatedText;
         public volatile Status status = Status.IDLE;
@@ -19,9 +21,10 @@ public final class StateStore {
         private TranslationTaskId task;
         private Source source;
 
-        Entry(String messageId, String contentHash) {
+        Entry(String messageId, String contentHash, String contextHash) {
             this.messageId = messageId;
             this.contentHash = contentHash;
+            this.contextHash = contextHash;
         }
     }
 
@@ -54,10 +57,14 @@ public final class StateStore {
     }
 
     /** LRU includes every status; evicted work loses ownership and cannot resurrect a record. */
-    public synchronized Entry obtain(String messageId, String contentHash) {
+    public Entry obtain(String messageId, String contentHash) {
+        return obtain(messageId, contentHash, "");
+    }
+
+    public synchronized Entry obtain(String messageId, String contentHash, String contextHash) {
         Entry entry = entries.get(messageId);
         if (entry == null || !contentHash.equals(entry.contentHash)) {
-            entry = new Entry(messageId, contentHash);
+            entry = new Entry(messageId, contentHash, contextHash);
             entries.remove(messageId);
             entries.put(messageId, entry);
             if (entries.size() > MAX_ENTRIES) {

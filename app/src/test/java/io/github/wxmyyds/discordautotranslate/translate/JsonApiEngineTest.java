@@ -129,6 +129,30 @@ public class JsonApiEngineTest {
     }
 
     @Test
+    public void wholeContextualRequestValidatesTheTranslationOnlyAgainstTheCurrentMessage()
+            throws Exception {
+        String original = "Move <keep1/>\nCheck again";
+        String translated = "移动<keep1/>\n再次检查";
+        String previous = String.join(" ", java.util.Collections.nCopies(20, "earlier discussion"));
+        FakeConnection connection = new FakeConnection(chatJson(translated));
+        AtomicInteger opens = new AtomicInteger();
+        JsonApiEngine engine = new JsonApiEngine(config(Config.PROTOCOL_OPENAI_COMPATIBLE, false),
+                http(url -> {
+                    opens.incrementAndGet();
+                    return connection;
+                }));
+
+        assertEquals(translated, engine.translate(original, previous));
+        assertEquals(1, opens.get());
+        JSONObject request = new JSONObject(connection.output.toString("UTF-8"));
+        JSONObject payload = new JSONObject(request.getJSONArray("messages")
+                .getJSONObject(1).getString("content"));
+        assertEquals("<translate>" + original + "</translate>", payload.getString("source"));
+        assertEquals(previous, payload.getString("preceding_context"));
+        assertTrue(active(engine).isEmpty());
+    }
+
+    @Test
     public void executeConnectionModeAndTranslateShareRequestsButNotTranslationValidation()
             throws Exception {
         for (String protocol : new String[]{Config.PROTOCOL_OPENAI_COMPATIBLE,
