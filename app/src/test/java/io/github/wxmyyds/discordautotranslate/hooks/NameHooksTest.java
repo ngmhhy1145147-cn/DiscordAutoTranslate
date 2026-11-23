@@ -60,9 +60,14 @@ public class NameHooksTest {
         String raw = Files.readString(Path.of("src/main/assets/hook-config/352017.json"));
         HookConfiguration profile = HookConfiguration.parse(raw, 352017);
         assertEquals(Set.of("name.voiceOverlay", "name.voiceChannelSelector"), profile.nameHooks());
-        assertEquals("ie.m", profile.hook("name.voiceOverlay").getJSONObject("target")
-                .getJSONObject("parameterTypes").getString("0"));
-        assertEquals("w", profile.hook("name.voiceChannelSelector").getJSONArray("modelPath").getString(0));
+        JSONObject overlay = profile.hook("name.voiceOverlay");
+        JSONObject selector = profile.hook("name.voiceChannelSelector");
+        assertDescriptor(overlay, "com.discord.mobile_voice_overlay.views.OverlayMenuView",
+                "setData", "ie.m");
+        assertDescriptor(selector, "le.m", "f", "k3.k1", "int");
+        assertEquals("c", overlay.getJSONArray("guildIdPath").getString(0));
+        assertEquals("d", overlay.getJSONArray("guildIdPath").getString(1));
+        assertEquals("w", selector.getJSONArray("modelPath").getString(0));
 
         JSONObject invalid = new JSONObject(raw);
         JSONObject binding = invalid.getJSONObject("hooks").getJSONObject("name.voiceOverlay");
@@ -71,6 +76,21 @@ public class NameHooksTest {
 
         String older = Files.readString(Path.of("src/main/assets/hook-config/340013.json"));
         assertTrue(HookConfiguration.parse(older, 340013).nameHooks().isEmpty());
+    }
+
+    private static void assertDescriptor(JSONObject hook, String owner, String method,
+            String... parameters) throws Exception {
+        JSONObject target = hook.getJSONObject("target");
+        assertEquals(owner, target.getString("class"));
+        assertEquals(method, target.getString("name"));
+        assertEquals("void", target.getString("returnType"));
+        assertFalse(target.getBoolean("static"));
+        assertEquals(parameters.length, target.getInt("parameterCount"));
+        JSONObject actual = target.getJSONObject("parameterTypes");
+        assertEquals(parameters.length, actual.length());
+        for (int i = 0; i < parameters.length; i++) {
+            assertEquals(parameters[i], actual.getString(Integer.toString(i)));
+        }
     }
 
     private static Config.Snapshot snapshot(boolean enabled, boolean server, boolean channel,
