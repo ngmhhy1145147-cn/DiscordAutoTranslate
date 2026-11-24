@@ -58,7 +58,7 @@ public class SchedulerTest {
         }
 
         @Override
-        public String translate(String text, String precedingContext) {
+        public String translate(String text) {
             calls.incrementAndGet();
             return result;
         }
@@ -95,6 +95,55 @@ public class SchedulerTest {
         Runnable delivery = deliveries.poll(5, TimeUnit.SECONDS);
         assertNotNull("result was not posted", delivery);
         return delivery;
+    }
+
+    @Test
+    public void oneBatchCallAndOneDeliverySkipMembersThatLostOwnershipWhileQueued()
+            throws Exception {
+        Scheduler scheduler = new Scheduler();
+        scheduler.setMaxConcurrency(1);
+        CountDownLatch holding = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch delivered = new CountDownLatch(1);
+        AtomicBoolean kept = new AtomicBoolean(true);
+        AtomicInteger calls = new AtomicInteger();
+        AtomicInteger callbacks = new AtomicInteger();
+        AtomicReference<List<String>> request = new AtomicReference<>();
+        AtomicReference<List<String>> result = new AtomicReference<>();
+        try {
+            submit(scheduler, "hold", "hash", "hold", text -> {
+                holding.countDown();
+                if (!release.await(5, TimeUnit.SECONDS)) throw new IllegalStateException();
+                return text;
+            }, ALWAYS, new Collector());
+            await(holding);
+            Scheduler.BatchItem one = new Scheduler.BatchItem(id("1", "one"), "source one");
+            Scheduler.BatchItem obsolete = new Scheduler.BatchItem(id("2", "two"), "old edit");
+            Scheduler.BatchItem three = new Scheduler.BatchItem(id("3", "three"), "source three");
+            scheduler.submitBatch(List.of(one, obsolete, three), texts -> {
+                calls.incrementAndGet();
+                request.set(texts);
+                return List.of("translation one", "translation three");
+            }, member -> member.equals(obsolete.id) ? kept.get() : true,
+                    (requested, accepted, translated, error) -> {
+                        assertNull(error);
+                        assertTrue(accepted);
+                        assertEquals(List.of(one, three), requested);
+                        result.set(translated);
+                        callbacks.incrementAndGet();
+                        delivered.countDown();
+                    });
+            kept.set(false);
+            release.countDown();
+            await(delivered);
+            assertEquals(1, calls.get());
+            assertEquals(1, callbacks.get());
+            assertEquals(List.of("source one", "source three"), request.get());
+            assertEquals(List.of("translation one", "translation three"), result.get());
+        } finally {
+            release.countDown();
+            assertTrue(scheduler.shutdownAndAwait(5000L));
+        }
     }
 
     private static void installQueuedDispatcher(BlockingQueue<Runnable> deliveries) {
@@ -260,7 +309,7 @@ public class SchedulerTest {
         CountDownLatch release = new CountDownLatch(1);
         try {
             AtomicInteger calls = new AtomicInteger();
-            Scheduler.Engine blocking = (text, precedingContext) -> {
+            Scheduler.Engine blocking = text -> {
                 calls.incrementAndGet();
                 release.await(5, TimeUnit.SECONDS);
                 return "t";
@@ -431,7 +480,7 @@ public class SchedulerTest {
         try {
             s.setMaxConcurrency(1);
             CountDownLatch holding = new CountDownLatch(1);
-            submit(s, "hold", "h0", "text", (text, precedingContext) -> {
+            submit(s, "hold", "h0", "text", text -> {
                 holding.countDown();
                 release.await(5, TimeUnit.SECONDS);
                 return "t";
@@ -471,7 +520,7 @@ public class SchedulerTest {
     public void errorIsClassifiedAndReported() throws Exception {
         Scheduler s = new Scheduler();
         try {
-            Scheduler.Engine failing = (text, precedingContext) -> {
+            Scheduler.Engine failing = text -> {
                 throw new TranslationException(TranslationException.Kind.NETWORK, "boom");
             };
             Collector c = new Collector();
@@ -492,7 +541,7 @@ public class SchedulerTest {
         Scheduler s = new Scheduler();
         try {
             AtomicInteger calls = new AtomicInteger();
-            Scheduler.Engine alwaysTimeout = (text, precedingContext) -> {
+            Scheduler.Engine alwaysTimeout = text -> {
                 calls.incrementAndGet();
                 throw new TranslationException(TranslationException.Kind.TIMEOUT, "timeout");
             };
@@ -512,7 +561,7 @@ public class SchedulerTest {
         Scheduler s = new Scheduler();
         try {
             AtomicInteger calls = new AtomicInteger();
-            Scheduler.Engine authFail = (text, precedingContext) -> {
+            Scheduler.Engine authFail = text -> {
                 calls.incrementAndGet();
                 throw new TranslationException(TranslationException.Kind.HTTP, "unauthorized", 401, null);
             };
@@ -530,7 +579,7 @@ public class SchedulerTest {
         Scheduler s = new Scheduler();
         try {
             AtomicInteger calls = new AtomicInteger();
-            Scheduler.Engine flaky = (text, precedingContext) -> {
+            Scheduler.Engine flaky = text -> {
                 calls.incrementAndGet();
                 throw new TranslationException(TranslationException.Kind.TIMEOUT, "timeout");
             };
@@ -573,7 +622,7 @@ public class SchedulerTest {
             AtomicInteger peak = new AtomicInteger();
             CountDownLatch entered = new CountDownLatch(2);
             CountDownLatch delivered = new CountDownLatch(6);
-            Scheduler.Engine slow = (text, precedingContext) -> {
+            Scheduler.Engine slow = text -> {
                 int now = concurrent.incrementAndGet();
                 peak.accumulateAndGet(now, Math::max);
                 entered.countDown();
@@ -608,7 +657,7 @@ public class SchedulerTest {
             s.setMaxConcurrency(8);
             CountDownLatch entered = new CountDownLatch(8);
             AtomicInteger calls = new AtomicInteger();
-            Scheduler.Engine blocking = (text, precedingContext) -> {
+            Scheduler.Engine blocking = text -> {
                 calls.incrementAndGet();
                 entered.countDown();
                 release.await(5, TimeUnit.SECONDS);
@@ -651,7 +700,7 @@ public class SchedulerTest {
             CountDownLatch allDelivered = new CountDownLatch(6);
             AtomicInteger calls = new AtomicInteger();
             AtomicInteger interrupted = new AtomicInteger();
-            Scheduler.Engine engine = (text, precedingContext) -> {
+            Scheduler.Engine engine = text -> {
                 calls.incrementAndGet();
                 try {
                     if (text.equals("first")) {
@@ -720,7 +769,7 @@ public class SchedulerTest {
             CountDownLatch holding = new CountDownLatch(1);
             CountDownLatch delivered = new CountDownLatch(6);
             List<String> order = Collections.synchronizedList(new ArrayList<>());
-            Scheduler.Engine engine = (text, precedingContext) -> {
+            Scheduler.Engine engine = text -> {
                 order.add(text);
                 if (text.equals("0")) {
                     holding.countDown();
@@ -771,7 +820,7 @@ public class SchedulerTest {
             s.setMaxConcurrency(1);
             CountDownLatch holding = new CountDownLatch(1);
             AtomicInteger calls = new AtomicInteger();
-            Scheduler.Engine blocking = (text, precedingContext) -> {
+            Scheduler.Engine blocking = text -> {
                 calls.incrementAndGet();
                 holding.countDown();
                 release.await(10, TimeUnit.SECONDS);
@@ -817,7 +866,7 @@ public class SchedulerTest {
         try {
             s.setMaxConcurrency(1);
             CountDownLatch holding = new CountDownLatch(1);
-            submit(s, "hold", "h", "text", (text, precedingContext) -> {
+            submit(s, "hold", "h", "text", text -> {
                 holding.countDown();
                 release.await(5, TimeUnit.SECONDS);
                 return "t";
@@ -874,7 +923,7 @@ public class SchedulerTest {
             CountDownLatch oldEntered = new CountDownLatch(1);
             CountDownLatch newEntered = new CountDownLatch(1);
             AtomicInteger calls = new AtomicInteger();
-            Scheduler.Engine engine = (text, precedingContext) -> {
+            Scheduler.Engine engine = text -> {
                 calls.incrementAndGet();
                 if (text.equals("old")) {
                     oldEntered.countDown();
@@ -957,7 +1006,7 @@ public class SchedulerTest {
         try {
             s.setMaxConcurrency(1);
             CountDownLatch holding = new CountDownLatch(1);
-            submit(s, "hold", "h", "text", (text, precedingContext) -> {
+            submit(s, "hold", "h", "text", text -> {
                 holding.countDown();
                 release.await(10, TimeUnit.SECONDS);
                 return "t";
@@ -1012,7 +1061,7 @@ public class SchedulerTest {
             AtomicInteger cancels = new AtomicInteger();
             Scheduler.Engine engine = new Scheduler.Engine() {
                 @Override
-                public String translate(String text, String precedingContext) throws Exception {
+                public String translate(String text) throws Exception {
                     holding.countDown();
                     release.await(5, TimeUnit.SECONDS);
                     return "t";
@@ -1054,7 +1103,7 @@ public class SchedulerTest {
             AtomicInteger cancels = new AtomicInteger();
             Scheduler.Engine engine = new Scheduler.Engine() {
                 @Override
-                public String translate(String text, String precedingContext) throws Exception {
+                public String translate(String text) throws Exception {
                     calls.incrementAndGet();
                     holding.countDown();
                     release.await(5, TimeUnit.SECONDS);
@@ -1108,7 +1157,7 @@ public class SchedulerTest {
                         completed.onResult(taskId, accepted, translated, error);
                     });
             Runnable delivery = take(deliveries);
-            Scheduler.Engine blocking = (text, precedingContext) -> {
+            Scheduler.Engine blocking = text -> {
                 holding.countDown();
                 try {
                     release.await();
@@ -1170,7 +1219,7 @@ public class SchedulerTest {
         try {
             CountDownLatch entered = new CountDownLatch(2);
             AtomicInteger calls = new AtomicInteger();
-            Scheduler.Engine blocking = (text, precedingContext) -> {
+            Scheduler.Engine blocking = text -> {
                 calls.incrementAndGet();
                 entered.countDown();
                 release.await(5, TimeUnit.SECONDS);
@@ -1195,7 +1244,7 @@ public class SchedulerTest {
         CountDownLatch release = new CountDownLatch(1);
         try {
             CountDownLatch entered = new CountDownLatch(2);
-            Scheduler.Engine blocking = (text, precedingContext) -> {
+            Scheduler.Engine blocking = text -> {
                 entered.countDown();
                 release.await(5, TimeUnit.SECONDS);
                 return "t";
@@ -1222,7 +1271,7 @@ public class SchedulerTest {
             s.setMaxConcurrency(1);
             CountDownLatch holding = new CountDownLatch(1);
             AtomicInteger calls = new AtomicInteger();
-            Scheduler.Engine engine = (text, precedingContext) -> {
+            Scheduler.Engine engine = text -> {
                 calls.incrementAndGet();
                 holding.countDown();
                 release.await(5, TimeUnit.SECONDS);
@@ -1250,7 +1299,7 @@ public class SchedulerTest {
         Scheduler s = new Scheduler();
         CountDownLatch holding = new CountDownLatch(1);
         try {
-            Scheduler.Engine slow = (text, precedingContext) -> {
+            Scheduler.Engine slow = text -> {
                 holding.countDown();
                 Thread.sleep(5000);
                 return "t";
@@ -1270,7 +1319,7 @@ public class SchedulerTest {
         CountDownLatch release = new CountDownLatch(1);
         CountDownLatch holding = new CountDownLatch(1);
         try {
-            Scheduler.Engine uncooperative = (text, precedingContext) -> {
+            Scheduler.Engine uncooperative = text -> {
                 holding.countDown();
                 boolean interrupted = false;
                 while (release.getCount() != 0) {

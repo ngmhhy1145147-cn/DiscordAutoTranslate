@@ -26,7 +26,9 @@ Chat 与 Anthropic SSE 必须收到各自结束事件，但不强制出现停止
 
 Responses 按 `output_index`、`content_index` 和 `item_id` 收集文本增量，校验递增事件序号，并逐段核对完成响应；按 output/content 顺序拼接全部 `message/output_text`，跳过 reasoning、工具等非 message output 项，拒绝 message 内容中的 refusal、流式 refusal 事件、failed、incomplete 和完成文本不一致。流式和非流式共用同一个完成文本提取操作，不用 `.done` 快照重复追加或补齐缺失增量。事件格式参见 [OpenAI 流式响应文档](https://developers.openai.com/api/docs/guides/streaming-responses)。
 
-HTTP 累计响应最多 1 MiB 字节，decoder/SSE 累计最多 1 MiB UTF-16 单位，UTF-8 严格校验，禁止跟随重定向。非 2xx 读取有界 body 后按 HTTP 状态分类；正文保留给设置页测试结果，并在项目日志启用时原样记录。引擎在配置校验和构造请求体前登记 `Http.Request`，取消与连接 attach 原子协调，finally 才释放；实际 worker 是否退出由生命周期另行确认。
+HTTP 累计响应最多 1 MiB 字节，decoder/SSE 累计最多 1 MiB UTF-16 单位，UTF-8 严格校验，禁止跟随重定向。非 2xx 读取有界 body 后按 HTTP 状态分类。普通请求在术语包未启用时保留正文给设置页测试结果和启用的项目日志。精翻批次与启用术语包的请求只保留错误类型和 HTTP 状态。引擎在配置校验和构造请求体前登记 `Http.Request`，取消与连接 attach 原子协调，finally 才释放。实际 worker 是否退出由生命周期另行确认。
+
+精翻以同一频道或私信内的待译正文组成一次请求。供应商的用户输入字段承载 `messages` 数组，每项为 `id` 与 `source`，并可带匹配的 `glossary`。请求内编号如 `m1` 用于区分正文，响应按 `translations` 数组中的 `id` 配对 `translation`。完成供应商解码后再校验数量、编号、每条译文的结构和保留标记，并在对应原文仍有效时分别回填。缺项、重复编号、未知编号或无效译文会使整批失败。
 
 ## 调度、缓存与错误
 
@@ -43,6 +45,8 @@ HTTP 累计响应最多 1 MiB 字节，decoder/SSE 累计最多 1 MiB UTF-16 单
 | `auto_translate_enabled` | true | 自动翻译开关 |
 | `logging_enabled` | false | 项目日志开关，不参与翻译版本 |
 | `translation_scope` | 默认翻译、无规则 | 单一 JSON 对象：`defaultTranslate`、`servers`、`channels`；规则含字符串 `id/label` 和布尔 `translate` |
+| `context_enabled` | false | 精翻模式开关 |
+| `context_characters` | 100 | 每批正文 Unicode 字符上限，允许 1–1000 |
 | `api_url` | `https://api.openai.com/v1` | 基础地址，自动追加协议端点 |
 | `api_key` / `extra_headers` | 空 | 密钥及每行 `Name: Value` 的额外头 |
 | `api_model` | `gpt-4o-mini` | 模型 |
@@ -77,7 +81,7 @@ HTTP 累计响应最多 1 MiB 字节，decoder/SSE 累计最多 1 MiB UTF-16 单
 | `CONNECTION`（测试连接） | 固定探针请求成功，按所选协议及 SSE/JSON 模式完成响应解析；**HTTP 200 不够**，不能忽略无效结构、异常停止或缺少完成事件 | 无；不运行译文防损坏校验 |
 | `TRANSLATION`（测试翻译） | 测试文本的请求、完整协议解析及 `Segments` 译文防损坏校验通过（非空、包装标签、旧分段标记、保留节点定位、占位符及长度比例）；不证明宿主节点重建的行段、样式或链接投影校验通过 | 仅成功时展示译文；失败不展示部分或损坏结果 |
 
-`ApiTester.Result` 返回测试类型、成功标志、耗时和结构化 `Failure`。设置页由唯一的 `ApiTestResultFormatter` 通过 `getString` 解析本地化资源，区分三种成功概念；失败显示本地化建议、类别及固定类别码、固定原因码、已知 HTTP 状态和异常类型。耗时只用于页面显示，不进入日志。Failure 包含 `kind / reason / httpStatus / exceptionType / upstreamErrorBody`，异常类型取底层 cause 类型（若有）；仅非 2xx HTTP 错误携带未经修改的上游正文，其余失败的 `upstreamErrorBody` 为 null。不携带原异常对象或异常消息，UI 不调用 `Throwable.getMessage()` 或 `userMessage()`。
+`ApiTester.Result` 返回测试类型、成功标志、耗时和结构化 `Failure`。设置页由唯一的 `ApiTestResultFormatter` 通过 `getString` 解析本地化资源，区分三种成功概念；失败显示本地化建议、类别及固定类别码、固定原因码、已知 HTTP 状态和异常类型。耗时只用于页面显示，不进入日志。Failure 包含 `kind / reason / httpStatus / exceptionType / upstreamErrorBody`，异常类型取底层 cause 类型（若有）。普通测试请求的非 2xx 错误在术语包未启用时携带上游正文，其余失败的 `upstreamErrorBody` 为 null。不携带原异常对象或异常消息，UI 不调用 `Throwable.getMessage()` 或 `userMessage()`。
 
 | 固定原因码 | 排查建议 |
 |---|---|
@@ -100,5 +104,4 @@ HTTP 累计响应最多 1 MiB 字节，decoder/SSE 累计最多 1 MiB UTF-16 单
 
 - **设置页进程：logcat**，标签为 `DiscordAutoTranslate`。页面不挂载 LSPosed 框架输出；不需要 LSPosed 连接，也不需要重启页面。必须将“项目日志”开关设为开启并成功保存后生效，或加载/导入已确认本地保存的值；草稿切换、草稿测试和失败的本地提交都不能强行开启日志。保存成功先应用已确认本地快照，再输出保存结果；远程同步失败仍与本地保存成功分开记录。成功保存关闭开关或重置为默认配置后，连该成功结果日志也不输出。
 - **Discord 进程：logcat + LSPosed 项目日志**，框架输出仅由模块入口挂载，使用 remote 配置。因此需保存并同步成功后重启 Discord，设置页的 logcat 诊断与 Discord 的 LSPosed 诊断不是同一进程/目的地。
-- 网络请求收到非 2xx 状态时，`JsonApiEngine` 将 HTTP 状态和上游响应正文交给统一错误结果；设置页测试结果原样显示正文，`ProjectLog` 在日志开关启用时也原样记录正文。HTTP 200 后的协议/译文错误不把成功响应正文当作错误详情。
-- 项目诊断不主动输出原请求正文、译文、消息身份、链接或凭据；**非 2xx 上游错误响应正文是明确允许展示和记录的例外**，不进入缓存或任务状态。错误响应正文可能包含上述敏感内容，分享日志或截图前应检查。
+- `JsonApiEngine` 在普通请求的术语包未启用时把非 2xx 上游正文交给设置页测试结果和启用的 `ProjectLog`。精翻批次和启用术语包的请求只输出固定错误类别与 HTTP 状态。HTTP 200 后的协议或译文错误使用固定描述和错误原因码。

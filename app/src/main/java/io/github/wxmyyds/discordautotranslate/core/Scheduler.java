@@ -4,6 +4,7 @@ import androidx.annotation.Nullable;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -17,6 +18,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 
 /**
  * FIFO translation scheduling with bounded pending work and main-thread result delivery.
@@ -26,12 +28,36 @@ public final class Scheduler {
 
     /** Implementations must return promptly when interrupted or cancelled. */
     public interface Engine {
-        String translate(String text, @Nullable String precedingContext) throws Exception;
+        String translate(String text) throws Exception;
 
         /** Cancel the request currently bound to this worker. */
         default void cancel(Thread worker) {
             worker.interrupt();
         }
+    }
+
+    public interface BatchEngine {
+        List<String> translateBatch(List<String> texts) throws Exception;
+
+        default void cancel(Thread worker) {
+            worker.interrupt();
+        }
+    }
+
+    public static final class BatchItem {
+        public final TranslationTaskId id;
+        public final String text;
+
+        public BatchItem(TranslationTaskId id, String text) {
+            this.id = Objects.requireNonNull(id, "id");
+            this.text = Objects.requireNonNull(text, "text");
+        }
+    }
+
+    /** Requested items and successful translations have identical order and cardinality. */
+    public interface BatchCallback {
+        void onResult(List<BatchItem> requested, boolean accepted,
+                      @Nullable List<String> translated, @Nullable Throwable error);
     }
 
     /** Results, including explicit admission failures, are delivered on the main thread. */
@@ -128,10 +154,10 @@ public final class Scheduler {
 
     /** The only lock for admission, dispatch, delivery reservation and shutdown; never for callbacks. */
     private final Object lifecycleLock = new Object();
-    private final ArrayDeque<Task> pending = new ArrayDeque<>();
-    private final Map<TaskKey, Task> inFlight = new HashMap<>();
+    private final ArrayDeque<Task<?>> pending = new ArrayDeque<>();
+    private final Map<Object, Task<?>> inFlight = new HashMap<>();
     /** Independent of the version map: an obsolete running attempt still owns an active slot. */
-    private final Set<Task> activeTasks = new HashSet<>();
+    private final Set<Task<?>> activeTasks = new HashSet<>();
     private int configuredConcurrency = Math.max(1, Math.min(POOL_MAX, Config.DEF_MAX_CONCURRENCY));
     /** Includes executor reservations, not callbacks or scheduler-pending work. */
     private int activeCount;
@@ -172,26 +198,34 @@ public final class Scheduler {
         }
     }
 
-    private final class Task implements Runnable {
-        final TranslationTaskId id;
-        final TaskKey key;
-        final String text;
-        @Nullable final String precedingContext;
-        final Engine engine;
-        final Acceptance acceptance;
-        final Callback callback;
+    private interface Work<T> {
+        T translate() throws Exception;
+    }
+
+    private interface Cancellation {
+        void cancel(Thread worker);
+    }
+
+    private interface ResultCallback<T> {
+        void onResult(boolean accepted, @Nullable T value, @Nullable Throwable error);
+    }
+
+    private final class Task<T> implements Runnable {
+        final Object key;
+        final Work<T> work;
+        final Cancellation cancellation;
+        final BooleanSupplier acceptance;
+        final ResultCallback<T> callback;
         /** Accessed only under lifecycleLock. */
         Thread worker;
         boolean delivered;
         volatile boolean obsolete;
 
-        Task(TranslationTaskId id, String text, @Nullable String precedingContext, Engine engine,
-             Acceptance acceptance, Callback callback) {
-            this.id = id;
-            this.key = new TaskKey(id);
-            this.text = text;
-            this.precedingContext = precedingContext;
-            this.engine = engine;
+        Task(Object key, Work<T> work, Cancellation cancellation, BooleanSupplier acceptance,
+             ResultCallback<T> callback) {
+            this.key = key;
+            this.work = work;
+            this.cancellation = cancellation;
             this.acceptance = acceptance;
             this.callback = callback;
         }
@@ -203,13 +237,13 @@ public final class Scheduler {
     }
 
     public void shutdown() {
-        Map<Thread, Engine> workers = new HashMap<>();
+        Map<Thread, Cancellation> workers = new HashMap<>();
         synchronized (lifecycleLock) {
             if (shutdown) return;
             shutdown = true;
             deliveryEpoch++;
-            for (Task task : activeTasks) {
-                if (task.worker != null) workers.put(task.worker, task.engine);
+            for (Task<?> task : activeTasks) {
+                if (task.worker != null) workers.put(task.worker, task.cancellation);
             }
             pending.clear();
             inFlight.clear();
@@ -219,7 +253,7 @@ public final class Scheduler {
             }
         }
         // Cancellation may involve engine locks or external code; never hold the scheduler lock here.
-        for (Map.Entry<Thread, Engine> entry : workers.entrySet()) {
+        for (Map.Entry<Thread, Cancellation> entry : workers.entrySet()) {
             try {
                 entry.getValue().cancel(entry.getKey());
             } catch (Throwable ignored) {
@@ -284,23 +318,61 @@ public final class Scheduler {
      */
     public void submit(TranslationTaskId taskId, String text, Engine engine,
                        Acceptance accept, Callback callback) {
-        submit(taskId, text, null, engine, accept, callback);
-    }
-
-    public void submit(TranslationTaskId taskId, String text, @Nullable String precedingContext,
-                       Engine engine, Acceptance accept, Callback callback) {
         Objects.requireNonNull(taskId, "taskId");
         Objects.requireNonNull(text, "text");
         Objects.requireNonNull(engine, "engine");
         Objects.requireNonNull(accept, "accept");
         Objects.requireNonNull(callback, "callback");
-        Task task = new Task(taskId, text, precedingContext, engine, accept, callback);
+        enqueue(new Task<>(new TaskKey(taskId), () -> engine.translate(text), engine::cancel,
+                () -> accept.isStillValid(taskId),
+                (accepted, value, error) -> callback.onResult(taskId, accepted, value, error)));
+    }
+
+    public void submitBatch(List<BatchItem> items, BatchEngine engine,
+                            Acceptance accept, BatchCallback callback) {
+        List<BatchItem> batch = Collections.unmodifiableList(new ArrayList<>(items));
+        if (batch.isEmpty()) throw new IllegalArgumentException("Empty translation batch");
+        List<TranslationTaskId> key = new ArrayList<>(batch.size());
+        for (BatchItem item : batch) key.add(item.id);
+        if (new HashSet<>(key).size() != key.size()) {
+            throw new IllegalArgumentException("Duplicate translation batch member");
+        }
+        AtomicReference<List<BatchItem>> requested = new AtomicReference<>(batch);
+        enqueue(new Task<List<String>>(key, () -> {
+            List<BatchItem> current = new ArrayList<>();
+            List<String> texts = new ArrayList<>();
+            for (BatchItem item : batch) {
+                if (accept.isStillValid(item.id)) {
+                    current.add(item);
+                    texts.add(item.text);
+                }
+            }
+            requested.set(Collections.unmodifiableList(current));
+            if (current.isEmpty()) {
+                throw new TranslationException(TranslationException.Kind.CANCELLED, "任务已失效");
+            }
+            List<String> values = engine.translateBatch(Collections.unmodifiableList(texts));
+            if (values == null || values.size() != current.size()) {
+                throw new TranslationException(TranslationException.Kind.PARSE,
+                        TranslationException.Reason.TRANSLATION_INVALID, "译文与批次消息数不一致");
+            }
+            return Collections.unmodifiableList(new ArrayList<>(values));
+        }, engine::cancel, () -> {
+            for (BatchItem item : batch) {
+                if (accept.isStillValid(item.id)) return true;
+            }
+            return false;
+        }, (accepted, translated, error) -> callback.onResult(
+                requested.get(), accepted, translated, error)));
+    }
+
+    private void enqueue(Task<?> task) {
         boolean queueFull;
-        List<Task> obsoletePending = new ArrayList<>();
+        List<Task<?>> obsoletePending = new ArrayList<>();
         List<Runnable> rejectedResults = new ArrayList<>();
         synchronized (lifecycleLock) {
             if (shutdown) return;
-            Task existing = inFlight.get(task.key);
+            Task<?> existing = inFlight.get(task.key);
             if (existing != null) {
                 if (isStillValid(existing)) return;
                 if (shutdown) return;
@@ -312,7 +384,7 @@ public final class Scheduler {
             if (pending.size() == PENDING_CAPACITY) {
                 // LRU eviction can invalidate unrelated waiting rows. Reclaim those slots before
                 // treating the newest binding as overflow; valid pending work is never displaced.
-                for (Task waiting : new ArrayList<>(pending)) {
+                for (Task<?> waiting : new ArrayList<>(pending)) {
                     if (!isStillValid(waiting) && pending.remove(waiting)) {
                         waiting.obsolete = true;
                         obsoletePending.add(waiting);
@@ -328,7 +400,7 @@ public final class Scheduler {
             }
         }
         for (Runnable result : rejectedResults) result.run();
-        for (Task obsolete : obsoletePending) {
+        for (Task<?> obsolete : obsoletePending) {
             postResult(obsolete, null, new TranslationException(
                     TranslationException.Kind.CANCELLED, "任务已失效"));
         }
@@ -344,7 +416,7 @@ public final class Scheduler {
      */
     private void dispatchLocked(List<Runnable> rejectedResults) {
         while (!shutdown && activeCount < configuredConcurrency && !pending.isEmpty()) {
-            Task task = pending.removeFirst();
+            Task<?> task = pending.removeFirst();
             activeCount++;
             activeTasks.add(task);
             try {
@@ -358,7 +430,7 @@ public final class Scheduler {
         }
     }
 
-    private void runTask(Task task) {
+    private <T> void runTask(Task<T> task) {
         synchronized (lifecycleLock) {
             if (shutdown) {
                 activeCount--;
@@ -367,7 +439,7 @@ public final class Scheduler {
             }
             task.worker = Thread.currentThread();
         }
-        String result = null;
+        T result = null;
         Throwable error = null;
         List<Runnable> rejectedResults = new ArrayList<>();
         try {
@@ -382,7 +454,7 @@ public final class Scheduler {
             if (shutdown || Thread.currentThread().isInterrupted()) {
                 throw new TranslationException(TranslationException.Kind.CANCELLED, "任务已取消");
             }
-            result = task.engine.translate(task.text, task.precedingContext);
+            result = task.work.translate();
         } catch (Throwable t) {
             error = t;
         } finally {
@@ -404,7 +476,7 @@ public final class Scheduler {
      * callbacks reenter shutdownAndAwait/resetAndAwait without blocking workers' final slot release.
      * Keep the dedup marker until the external callback returns, including when it throws or reenters.
      */
-    private void postResult(Task task, @Nullable String translated, @Nullable Throwable error) {
+    private <T> void postResult(Task<T> task, @Nullable T translated, @Nullable Throwable error) {
         final long epoch;
         synchronized (lifecycleLock) {
             if (shutdown) return;
@@ -430,7 +502,7 @@ public final class Scheduler {
                 }
             }
             try {
-                task.callback.onResult(task.id, accepted, translated, error);
+                task.callback.onResult(accepted, translated, error);
             } finally {
                 synchronized (lifecycleLock) {
                     inFlight.remove(task.key, task);
@@ -439,9 +511,9 @@ public final class Scheduler {
         });
     }
 
-    private boolean isStillValid(Task task) {
+    private boolean isStillValid(Task<?> task) {
         try {
-            return !task.obsolete && task.acceptance.isStillValid(task.id);
+            return !task.obsolete && task.acceptance.getAsBoolean();
         } catch (Throwable t) {
             return false;
         }
@@ -583,6 +655,10 @@ public final class Scheduler {
         }
 
         public static void post(Runnable runnable) {
+            postDelayed(runnable, 0L);
+        }
+
+        public static boolean postDelayed(Runnable runnable, long delayMs) {
             final android.os.Handler handler;
             final Dispatcher dispatcher;
             final long epoch;
@@ -591,7 +667,7 @@ public final class Scheduler {
                 dispatcher = sTestDispatcher;
                 epoch = sEpoch;
             }
-            if (handler == null && dispatcher == null) return;
+            if (handler == null && dispatcher == null) return false;
 
             Runnable guarded = () -> {
                 synchronized (LOCK) {
@@ -603,12 +679,13 @@ public final class Scheduler {
                 runnable.run();
             };
             if (dispatcher != null) {
-                dispatcher.post(guarded);
-            } else if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
-                guarded.run();
-            } else {
-                handler.post(guarded);
+                return dispatcher.post(guarded);
             }
+            if (delayMs == 0L && android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+                guarded.run();
+                return true;
+            }
+            return handler.postDelayed(guarded, delayMs);
         }
     }
 }

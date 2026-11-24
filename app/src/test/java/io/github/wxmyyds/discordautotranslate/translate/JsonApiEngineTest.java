@@ -2,10 +2,13 @@ package io.github.wxmyyds.discordautotranslate.translate;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import io.github.wxmyyds.discordautotranslate.core.Config;
+import io.github.wxmyyds.discordautotranslate.core.GlossaryLibrary;
 import io.github.wxmyyds.discordautotranslate.core.Http;
 import io.github.wxmyyds.discordautotranslate.core.MemoryPrefs;
 import io.github.wxmyyds.discordautotranslate.core.TranslationException;
@@ -26,6 +29,7 @@ import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -129,12 +133,82 @@ public class JsonApiEngineTest {
     }
 
     @Test
-    public void wholeContextualRequestValidatesTheTranslationOnlyAgainstTheCurrentMessage()
+    public void batchUsesOneHttpExchangeAndReturnsEveryMessageForEachProtocolAndMode()
             throws Exception {
-        String original = "Move <keep1/>\nCheck again";
-        String translated = "移动<keep1/>\n再次检查";
-        String previous = String.join(" ", java.util.Collections.nCopies(20, "earlier discussion"));
-        FakeConnection connection = new FakeConnection(chatJson(translated));
+        String first = "Move <keep1/>\nCheck again";
+        String second = "Use it now";
+        String firstTranslation = "移动<keep1/>\n再次检查";
+        String secondTranslation = "现在使用";
+        String reply = batchReply(firstTranslation, secondTranslation);
+        for (String protocol : new String[]{Config.PROTOCOL_OPENAI_COMPATIBLE,
+                Config.PROTOCOL_OPENAI_RESPONSES, Config.PROTOCOL_ANTHROPIC_MESSAGES}) {
+            for (boolean streaming : new boolean[]{false, true}) {
+                FakeConnection connection = new FakeConnection(providerReply(protocol, streaming, reply));
+                AtomicInteger opens = new AtomicInteger();
+                JsonApiEngine engine = new JsonApiEngine(config(protocol, streaming), http(url -> {
+                    opens.incrementAndGet();
+                    return connection;
+                }));
+                assertEquals(List.of(firstTranslation, secondTranslation),
+                        engine.translateBatch(List.of(first, second)));
+                assertEquals(1, opens.get());
+                JSONObject request = new JSONObject(connection.output.toString("UTF-8"));
+                assertEquals(streaming, request.getBoolean("stream"));
+                String payload = Config.PROTOCOL_OPENAI_RESPONSES.equals(protocol)
+                        ? request.getString("input") : request.getJSONArray("messages")
+                        .getJSONObject(Config.PROTOCOL_ANTHROPIC_MESSAGES.equals(protocol) ? 0 : 1)
+                        .getString("content");
+                JSONArray messages = new JSONObject(payload).getJSONArray("messages");
+                assertEquals(2, messages.length());
+                assertEquals(first, messages.getJSONObject(0).getString("source"));
+                assertEquals(second, messages.getJSONObject(1).getString("source"));
+                assertTrue(connection.disconnected);
+                assertTrue(active(engine).isEmpty());
+            }
+        }
+    }
+
+    @Test
+    public void invalidBatchReplyFailsAllMembersAfterOneRequestWithoutRetry() throws Exception {
+        String protocol = Config.PROTOCOL_OPENAI_COMPATIBLE;
+        List<String> originals = List.of("Move <keep1/>\nCheck again", "Use it now");
+        String goodReply = batchReply("移动<keep1/>\n再次检查", "现在使用");
+        String[] responses = {
+                // The two results returned under the wrong IDs.
+                providerReply(protocol, true, batchReply("现在使用", "移动<keep1/>\n再次检查")),
+                // The anchor is present but the line break was removed.
+                providerReply(protocol, true, batchReply("移动<keep1/> 再次检查", "现在使用")),
+                // Provider closed before the SSE terminal event.
+                "data: {\"choices\":[{\"delta\":{\"content\":" + JSONObject.quote(goodReply) + "}}]}\n\n",
+                providerReply(protocol, true, goodReply.replace("\"m2\"", "\"m1\""))
+        };
+        TranslationException.Reason[] reasons = {
+                TranslationException.Reason.TRANSLATION_INVALID,
+                TranslationException.Reason.TRANSLATION_INVALID,
+                TranslationException.Reason.RESPONSE_INCOMPLETE,
+                TranslationException.Reason.RESPONSE_INVALID
+        };
+        for (int i = 0; i < responses.length; i++) {
+            FakeConnection connection = new FakeConnection(responses[i]);
+            AtomicInteger opens = new AtomicInteger();
+            JsonApiEngine engine = new JsonApiEngine(config(protocol, true), http(url -> {
+                opens.incrementAndGet();
+                return connection;
+            }));
+            TranslationException failure = assertThrows(TranslationException.class,
+                    () -> engine.translateBatch(originals));
+            assertEquals(reasons[i], failure.reason());
+            assertEquals(1, opens.get());
+            assertTrue(connection.disconnected);
+            assertTrue(active(engine).isEmpty());
+        }
+    }
+
+    @Test
+    public void batchHttpFailureDoesNotExposeAnEchoOfItsSource() throws Exception {
+        String source = "provider echoed private material";
+        FakeConnection connection = new FakeConnection(source);
+        connection.status = 429;
         AtomicInteger opens = new AtomicInteger();
         JsonApiEngine engine = new JsonApiEngine(config(Config.PROTOCOL_OPENAI_COMPATIBLE, false),
                 http(url -> {
@@ -142,14 +216,54 @@ public class JsonApiEngineTest {
                     return connection;
                 }));
 
-        assertEquals(translated, engine.translate(original, previous));
+        TranslationException error = assertThrows(TranslationException.class,
+                () -> engine.translateBatch(List.of(source, "second message")));
+        assertEquals(TranslationException.Reason.RATE_LIMITED, error.reason());
+        assertEquals(429, error.httpStatus());
+        assertFalse(error instanceof JsonApiEngine.UpstreamHttpException);
+        assertFalse(error.getMessage().contains(source));
         assertEquals(1, opens.get());
-        JSONObject request = new JSONObject(connection.output.toString("UTF-8"));
-        JSONObject payload = new JSONObject(request.getJSONArray("messages")
-                .getJSONObject(1).getString("content"));
-        assertEquals("<translate>" + original + "</translate>", payload.getString("source"));
-        assertEquals(previous, payload.getString("preceding_context"));
         assertTrue(active(engine).isEmpty());
+    }
+
+    @Test
+    public void activeGlossaryAlsoRedactsProviderBodyFromSettingsTests() throws Exception {
+        String echo = "provider echoed a glossary term";
+        FakeConnection connection = new FakeConnection(echo);
+        connection.status = 403;
+        GlossaryLibrary.Pack pack = GlossaryLibrary.readPack(new ByteArrayInputStream(
+                "{\"name\":\"Test\",\"terms\":[[\"world\",\"世界\"]]}".getBytes(StandardCharsets.UTF_8)));
+        Config.Snapshot config = Config.read(new MemoryPrefs()
+                .put(Config.KEY_API_URL, "https://fake.invalid/v1")
+                .put(Config.KEY_STREAMING, false)
+                .put(Config.KEY_GLOSSARY_LIBRARY, GlossaryLibrary.EMPTY.addAndSelect(pack).toJson()));
+        JsonApiEngine engine = new JsonApiEngine(config, http(url -> connection));
+        ApiTester.Result result = new ApiTester.Call(engine, ApiTester.TestKind.CONNECTION,
+                ApiTester.DEFAULT_TEST_TEXT, config).call();
+        assertFalse(result.ok);
+        assertEquals(403, result.failure.httpStatus);
+        assertNull(result.failure.upstreamErrorBody);
+        assertTrue(active(engine).isEmpty());
+    }
+
+    private static String batchReply(String first, String second) throws Exception {
+        return new JSONObject().put("translations", new JSONArray()
+                .put(new JSONObject().put("id", "m2").put("translation", second))
+                .put(new JSONObject().put("id", "m1").put("translation", first))).toString();
+    }
+
+    private static String providerReply(String protocol, boolean streaming, String output) {
+        if (Config.PROTOCOL_OPENAI_RESPONSES.equals(protocol)) {
+            return streaming ? responsesDelta(0, output) + responsesCompleted(1, output)
+                    : responsesJson(output);
+        }
+        if (Config.PROTOCOL_ANTHROPIC_MESSAGES.equals(protocol)) {
+            return streaming ? "data: {\"type\":\"content_block_delta\",\"delta\":{"
+                    + "\"type\":\"text_delta\",\"text\":" + JSONObject.quote(output)
+                    + "}}\n\ndata: {\"type\":\"message_stop\"}\n\n" : anthropicJson(output);
+        }
+        return streaming ? "data: {\"choices\":[{\"delta\":{\"content\":"
+                + JSONObject.quote(output) + "}}]}\n\ndata: [DONE]\n\n" : chatJson(output);
     }
 
     @Test

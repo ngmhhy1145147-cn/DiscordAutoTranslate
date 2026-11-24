@@ -1,9 +1,11 @@
 package io.github.wxmyyds.discordautotranslate.translate;
 
-import androidx.annotation.Nullable;
-
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
+import io.github.wxmyyds.discordautotranslate.core.BlankLines;
 import io.github.wxmyyds.discordautotranslate.core.Config;
 import io.github.wxmyyds.discordautotranslate.core.Http;
 import io.github.wxmyyds.discordautotranslate.core.Protocols;
@@ -28,7 +30,7 @@ import io.github.wxmyyds.discordautotranslate.core.TranslationException;
  * <p>不承诺兼容所有接口：配置不完整或响应结构不匹配时通过
  * {@link TranslationException} 给出明确错误（需求 §5.5）。</p>
  */
-public final class JsonApiEngine implements Scheduler.Engine {
+public final class JsonApiEngine implements Scheduler.Engine, Scheduler.BatchEngine {
 
     private final Config.Snapshot cfg;
     private final Http http;
@@ -65,22 +67,60 @@ public final class JsonApiEngine implements Scheduler.Engine {
         }
     }
 
-    public String translate(String text) throws Exception {
-        return translate(text, null);
-    }
-
     @Override
-    public String translate(String text, @Nullable String precedingContext) throws Exception {
-        return execute(text, true, precedingContext).translated;
+    public String translate(String text) throws Exception {
+        return execute(text, true).translated;
     }
 
     /** Connection probes share all request/decoder ownership, but do not judge translation safety. */
     Exchange execute(String text, boolean validateTranslation) throws Exception {
-        return execute(text, validateTranslation, null);
+        return withRequest(request -> {
+            if (text == null || text.trim().isEmpty()) {
+                throw new TranslationException(TranslationException.Kind.EMPTY, "原文为空，无需翻译");
+            }
+            Http.Headers headers = validateConfig(cfg);
+            String body = Protocols.requestBody(cfg.protocol, text, systemPrompt(),
+                    cfg.model, cfg.streaming, cfg.glossary);
+            Http.Response response = requestOnce(body, request, headers, cfg.glossary.isEmpty());
+            String translated = response.body;
+            if (translated == null || translated.trim().isEmpty()) {
+                throw new TranslationException(TranslationException.Kind.EMPTY,
+                        "提取到的译文为空", response.status, null);
+            }
+            translated = translated.trim();
+            if (validateTranslation) requireValidTranslation(text, translated, response.status);
+            return new Exchange(translated, response.status);
+        });
     }
 
-    private Exchange execute(String text, boolean validateTranslation,
-                             @Nullable String precedingContext) throws Exception {
+    @Override
+    public List<String> translateBatch(List<String> sources) throws Exception {
+        return withRequest(request -> {
+            List<String> original = new ArrayList<>(sources);
+            Http.Headers headers = validateConfig(cfg);
+            String body = Protocols.batchRequestBody(cfg.protocol, original, systemPrompt(),
+                    cfg.model, cfg.streaming, cfg.glossary);
+            Http.Response response = requestOnce(body, request, headers, false);
+            List<String> results = Protocols.parseBatchTranslation(response.body, original.size());
+            List<String> validated = new ArrayList<>(results.size());
+            for (int i = 0; i < results.size(); i++) {
+                String source = original.get(i);
+                String translated = results.get(i).trim();
+                requireValidTranslation(source, translated, response.status);
+                if (!sameLineStructure(source.trim(), translated)) {
+                    throw invalidTranslation("行数或空行位置改变", response.status);
+                }
+                validated.add(translated);
+            }
+            return Collections.unmodifiableList(validated);
+        });
+    }
+
+    private interface RequestWork<T> {
+        T run(Http.Request request) throws Exception;
+    }
+
+    private <T> T withRequest(RequestWork<T> work) throws Exception {
         Thread worker = Thread.currentThread();
         Http.Request request = new Http.Request();
         if (active.putIfAbsent(worker, request) != null) {
@@ -90,27 +130,9 @@ public final class JsonApiEngine implements Scheduler.Engine {
             // Registration precedes validation/body construction. A prior cancel interrupts
             // the worker; a concurrent cancel marks this handle before any connection exists.
             request.checkCancelled();
-            if (text == null || text.trim().isEmpty()) {
-                throw new TranslationException(TranslationException.Kind.EMPTY, "原文为空，无需翻译");
-            }
-            Http.Headers headers = validateConfig(cfg);
-            Http.Response response = requestOnce(text, precedingContext, request, headers);
-            String translated = response.body;
-            if (translated == null || translated.trim().isEmpty()) {
-                throw new TranslationException(TranslationException.Kind.EMPTY,
-                        "提取到的译文为空", response.status, null);
-            }
-            translated = translated.trim();
-            if (validateTranslation) {
-                String violation = Segments.plainTextViolation(translated, text);
-                if (violation != null) {
-                    throw new TranslationException(TranslationException.Kind.PARSE,
-                            TranslationException.Reason.TRANSLATION_INVALID,
-                            "译文未通过防损坏校验：" + violation, response.status, null);
-                }
-            }
+            T result = work.run(request);
             request.checkCancelled();
-            return new Exchange(translated, response.status);
+            return result;
         } catch (Exception e) {
             request.checkCancelled();
             throw e;
@@ -119,27 +141,49 @@ public final class JsonApiEngine implements Scheduler.Engine {
         }
     }
 
-    /** Sends exactly once and retains the decoded response status for post-request validation. */
-    private Http.Response requestOnce(String text, @Nullable String precedingContext,
-                                      Http.Request request, Http.Headers headers)
-            throws Exception {
-        // 1) 单一输入按协议构造请求体；已保存提示词也追加原样保留结构标记的规则。
-        boolean sse = cfg.streaming;
-        String systemPrompt = Config.DEF_SYSTEM_PROMPT.equals(cfg.systemPrompt)
+    private String systemPrompt() {
+        return Config.DEF_SYSTEM_PROMPT.equals(cfg.systemPrompt)
                 ? Config.defaultSystemPromptFor(cfg.targetLang) : cfg.systemPrompt;
-        String body = Protocols.requestBody(cfg.protocol, text, systemPrompt, cfg.model,
-                sse, precedingContext, cfg.glossary);
+    }
+
+    private static void requireValidTranslation(String source, String translated, int status)
+            throws TranslationException {
+        String violation = Segments.plainTextViolation(translated, source);
+        if (violation != null) {
+            throw invalidTranslation(violation, status);
+        }
+    }
+
+    private static boolean sameLineStructure(String source, String translated) {
+        String[] expected = source.split("\n", -1);
+        String[] actual = translated.split("\n", -1);
+        if (expected.length != actual.length) return false;
+        for (int i = 0; i < expected.length; i++) {
+            if (BlankLines.isBlank(expected[i]) != BlankLines.isBlank(actual[i])) return false;
+        }
+        return true;
+    }
+
+    private static TranslationException invalidTranslation(String violation, int status) {
+        return new TranslationException(TranslationException.Kind.PARSE,
+                TranslationException.Reason.TRANSLATION_INVALID,
+                "译文未通过防损坏校验：" + violation, status, null);
+    }
+
+    /** Sends exactly once and retains the decoded response status for post-request validation. */
+    private Http.Response requestOnce(String body, Http.Request request, Http.Headers headers,
+                                      boolean retainProviderErrorBody)
+            throws Exception {
         buildHeaders(headers);
 
         // Decoder selection is fixed for this request; no reparsing or mode detection.
         request.checkCancelled();
         String url = Protocols.endpoint(cfg.protocol, cfg.apiUrl);
         Http.Response resp = http.postJson(url, body, headers, request,
-                Protocols.createDecoder(cfg.protocol, sse));
+                Protocols.createDecoder(cfg.protocol, cfg.streaming));
 
-        // 3) 状态码归类
         if (!resp.isSuccess()) {
-            throw classifyHttpError(resp, precedingContext == null && cfg.glossary.isEmpty());
+            throw classifyHttpError(resp, retainProviderErrorBody);
         }
 
         // Successful HTTP bodies have already passed the selected protocol decoder.
@@ -222,12 +266,12 @@ public final class JsonApiEngine implements Scheduler.Engine {
         }
     }
 
-    /** Contextual requests can echo the reference text or glossary in an upstream error. */
-    private TranslationException classifyHttpError(Http.Response resp, boolean logResponseBody) {
+    /** Only the ordinary provider path can expose the upstream body for settings diagnostics. */
+    private TranslationException classifyHttpError(Http.Response resp, boolean retainProviderBody) {
         int status = resp.status;
         if (resp.body != null && !resp.body.isEmpty()) {
             ProjectLog.warn("api.upstream.error httpStatus=" + status
-                    + (logResponseBody ? " body=" + resp.body : ""));
+                    + (retainProviderBody ? " body=" + resp.body : ""));
         }
         TranslationException.Kind kind = status == 429
                 ? TranslationException.Kind.RATE_LIMIT : TranslationException.Kind.HTTP;
@@ -236,6 +280,9 @@ public final class JsonApiEngine implements Scheduler.Engine {
         String message = status == 429 ? "限流"
                 : status == 401 || status == 403 ? "认证失败（请检查 API 密钥）"
                 : status >= 500 ? "服务端错误" : "请求失败";
+        if (!retainProviderBody) {
+            return new TranslationException(kind, reason, message, status, null);
+        }
         return new UpstreamHttpException(kind, reason, message, status,
                 resp.body == null ? "" : resp.body);
     }

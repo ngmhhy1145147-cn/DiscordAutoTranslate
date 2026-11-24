@@ -6,6 +6,7 @@ import io.github.wxmyyds.discordautotranslate.core.HookConfiguration;
 import io.github.wxmyyds.discordautotranslate.core.TranslationScope;
 
 import java.lang.reflect.Method;
+import java.util.Objects;
 
 /** Exact, profile-verified message location readers; no alternative access or string guessing. */
 final class MessageLocation {
@@ -19,6 +20,17 @@ final class MessageLocation {
         }
         this.guildId = guildId;
         this.channelId = channelId;
+    }
+
+    @Override public boolean equals(Object other) {
+        if (this == other) return true;
+        if (!(other instanceof MessageLocation)) return false;
+        MessageLocation that = (MessageLocation) other;
+        return Objects.equals(guildId, that.guildId) && channelId.equals(that.channelId);
+    }
+
+    @Override public int hashCode() {
+        return 31 * Objects.hashCode(guildId) + channelId.hashCode();
     }
 
     static final class Reader {

@@ -25,6 +25,7 @@ import org.junit.Test;
 import java.lang.reflect.Field;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 
 /** Real scope gate, result callback and config transitions; no network or worker submissions. */
 public class TranslationScopeBridgeTest {
@@ -107,7 +108,7 @@ public class TranslationScopeBridgeTest {
     }
 
     @Test
-    public void contextualRebindChangesRequestIdentityWithoutMakingExistingRenderStaleEarly()
+    public void qualityCacheIdentityStaysStableOnRebindButIsIsolatedPerCanonicalMessage()
             throws Exception {
         Config.Snapshot contextual = Config.read(new MemoryPrefs()
                 .put(Config.KEY_TARGET_LANG, "简体中文")
@@ -118,21 +119,77 @@ public class TranslationScopeBridgeTest {
         bridge.rememberMessageLocation(ROW, location);
         bridge.rememberMessageLocation(OTHER_ROW, location);
         PrimitiveStructurableText subject = new PrimitiveStructurableText("当前正文用于检测");
-        bridge.onMessageBound(ROW, new PrimitiveStructurableText("对话的早期内容"));
+        bridge.onMessageBound(ROW, subject);
         bridge.onMessageBound(OTHER_ROW, subject);
         StateStore.Entry first = store.peek(OTHER_ROW);
         assertNotNull(first);
-        assertFalse(first.contextHash.isEmpty());
+        assertNotEquals(store.peek(ROW).contentHash, first.contentHash);
         assertSame(first, bridge.matchingState(OTHER_ROW, TextExtractor.extract(subject)));
 
         bridge.onMessageBound(ROW, new PrimitiveStructurableText("早期内容已编辑"));
-        assertSame(first, bridge.matchingState(OTHER_ROW, TextExtractor.extract(subject)));
         bridge.onMessageBound(OTHER_ROW, subject);
-        StateStore.Entry revised = store.peek(OTHER_ROW);
-        assertNotNull(revised);
-        assertNotEquals(first.contentHash, revised.contentHash);
-        assertNotEquals(first.contextHash, revised.contextHash);
-        assertSame(revised, bridge.matchingState(OTHER_ROW, TextExtractor.extract(subject)));
+        assertSame(first, store.peek(OTHER_ROW));
+        assertSame(first, bridge.matchingState(OTHER_ROW, TextExtractor.extract(subject)));
+    }
+
+    @Test
+    public void malformedBatchMemberFailsEveryAdmittedResultWithoutCachingEarlierRows()
+            throws Exception {
+        Config.Snapshot quality = Config.read(new MemoryPrefs()
+                .put(Config.KEY_CONTEXT_ENABLED, true)
+                .put(Config.KEY_TARGET_LANG, "简体中文"));
+        bridge.updateConfig(quality);
+        forbidRequests();
+        MessageLocation location = new MessageLocation(null, "20");
+        Scheduler.BatchItem first = prepareQualityMember(ROW, location, "第一行正文");
+        Scheduler.BatchItem second = prepareQualityMember(OTHER_ROW, location, "另一条正文");
+        List<Scheduler.BatchItem> batch = List.of(first, second);
+        Field constructor = StructurableTextFactory.class.getDeclaredField("sPrimitiveCtor");
+        constructor.setAccessible(true);
+        Object previous = constructor.get(null);
+        constructor.set(null, PrimitiveStructurableText.class.getDeclaredConstructor(String.class));
+        try {
+            bridge.completeQualityBatch(location, batch, batch, true,
+                    List.of("第一条译文", "无效锚点<keep17/>"), null);
+            for (Scheduler.BatchItem item : batch) {
+                StateStore.Entry entry = store.peek(item.id.messageId);
+                assertEquals(StateStore.Status.FAILED, entry.status);
+                assertNull(entry.translatedText);
+                assertNull(TranslationCache.get().get(item.id.contentHash));
+            }
+        } finally {
+            constructor.set(null, previous);
+        }
+    }
+
+    @Test
+    public void repliesFromObsoleteScopeNeverPublishAnyBatchMember() throws Exception {
+        bridge.updateConfig(Config.read(new MemoryPrefs()
+                .put(Config.KEY_CONTEXT_ENABLED, true)
+                .put(Config.KEY_TARGET_LANG, "简体中文")));
+        forbidRequests();
+        MessageLocation location = new MessageLocation("10", "20");
+        Scheduler.BatchItem first = prepareQualityMember(ROW, location, "第一行正文");
+        Scheduler.BatchItem second = prepareQualityMember(OTHER_ROW, location, "另一条正文");
+        List<Scheduler.BatchItem> batch = List.of(first, second);
+        TranslationScope empty = new TranslationScope(false, Collections.emptyList(),
+                Collections.emptyList());
+        bridge.updateConfig(snapshot(true, empty));
+        bridge.completeQualityBatch(location, batch, batch, true,
+                List.of("第一条译文", "第二条译文"), null);
+        for (Scheduler.BatchItem item : batch) {
+            assertNull(store.peek(item.id.messageId));
+            assertNull(TranslationCache.get().get(item.id.contentHash));
+        }
+    }
+
+    private Scheduler.BatchItem prepareQualityMember(String id, MessageLocation location, String text) {
+        bridge.rememberMessageLocation(id, location);
+        // The source already matches the target script, so only the production hash/source binding runs.
+        bridge.onMessageBound(id, new PrimitiveStructurableText(text));
+        TranslationTaskId task = store.begin(store.peek(id));
+        assertNotNull(task);
+        return new Scheduler.BatchItem(task, text);
     }
 
     @Test
@@ -487,7 +544,7 @@ public class TranslationScopeBridgeTest {
 
     /** A regression must fail locally in the fake engine, never contact an API. */
     private void forbidRequests() throws Exception {
-        setFakeConfiguration(bridge.translationConfiguration().snapshot, (text, precedingContext) -> {
+        setFakeConfiguration(bridge.translationConfiguration().snapshot, text -> {
             throw new AssertionError("Scope/cache-only test unexpectedly submitted a request");
         });
     }
@@ -495,7 +552,9 @@ public class TranslationScopeBridgeTest {
     private void setFakeConfiguration(Config.Snapshot snapshot, Scheduler.Engine engine)
             throws Exception {
         bridgeField("configuration").set(bridge,
-                new HookBridge.TranslationConfiguration(snapshot, engine));
+                new HookBridge.TranslationConfiguration(snapshot, engine, texts -> {
+                    throw new AssertionError("Scope/cache-only test unexpectedly submitted a batch");
+                }));
     }
 
     private void assertDeniedCallback(String key) {

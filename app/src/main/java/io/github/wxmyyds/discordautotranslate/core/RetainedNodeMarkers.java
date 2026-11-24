@@ -50,6 +50,12 @@ public final class RetainedNodeMarkers {
         return EXACT.matcher(text).replaceAll(" ");
     }
 
+    /** The batch budget counts source Unicode code points, excluding protocol-only markers. */
+    public static int sourceCharacters(String text) {
+        String visible = STYLE.matcher(withoutMarkers(text)).replaceAll("");
+        return visible.codePointCount(0, visible.length());
+    }
+
     public static boolean matchesSource(String translated, String source) {
         List<String> expected = read(source);
         return expected != null && matchesExpected(translated, expected);

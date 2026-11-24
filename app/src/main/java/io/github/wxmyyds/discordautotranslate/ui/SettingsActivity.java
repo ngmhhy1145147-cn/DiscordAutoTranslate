@@ -154,8 +154,8 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
     private CheckBox messageTarget;
     private CheckBox serverNameTarget;
     private CheckBox channelNameTarget;
-    private CheckBox contextEnabledInput;
-    private EditText contextCharactersInput;
+    private CheckBox batchModeInput;
+    private EditText batchCharactersInput;
     private Spinner glossarySpinner;
     private Button glossaryImportButton;
     private Button glossaryRemoveButton;
@@ -243,7 +243,7 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
         draft.putBoolean(Config.KEY_TRANSLATE_MESSAGES, messageTarget.isChecked());
         draft.putBoolean(Config.KEY_TRANSLATE_SERVER_NAMES, serverNameTarget.isChecked());
         draft.putBoolean(Config.KEY_TRANSLATE_CHANNEL_NAMES, channelNameTarget.isChecked());
-        draft.putBoolean(Config.KEY_CONTEXT_ENABLED, contextEnabledInput.isChecked());
+        draft.putBoolean(Config.KEY_CONTEXT_ENABLED, batchModeInput.isChecked());
         draft.putString(Config.KEY_GLOSSARY_LIBRARY, glossaryDraft.toJson());
         draft.putBoolean("logging", loggingInput.isChecked());
         draft.putBoolean("streaming", streamingInput.isChecked());
@@ -274,7 +274,7 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
                     Config.DEF_TRANSLATE_SERVER_NAMES));
             channelNameTarget.setChecked(draft.getBoolean(Config.KEY_TRANSLATE_CHANNEL_NAMES,
                     Config.DEF_TRANSLATE_CHANNEL_NAMES));
-            contextEnabledInput.setChecked(draft.getBoolean(Config.KEY_CONTEXT_ENABLED, Config.DEF_CONTEXT_ENABLED));
+            batchModeInput.setChecked(draft.getBoolean(Config.KEY_CONTEXT_ENABLED, Config.DEF_CONTEXT_ENABLED));
             String glossary = draft.getString(Config.KEY_GLOSSARY_LIBRARY);
             showGlossary(glossary == null ? GlossaryLibrary.EMPTY : GlossaryLibrary.parse(glossary));
             loggingInput.setChecked(draft.getBoolean("logging", Config.DEF_LOGGING_ENABLED));
@@ -636,10 +636,10 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
         serverNameTarget = addOption(parent, R.string.target_server_names);
         channelNameTarget = addOption(parent, R.string.target_channel_names);
         addOptionHint(parent, R.string.hint_name_targets);
-        contextEnabledInput = addOption(parent, R.string.label_context_mode);
-        contextCharactersInput = addField(parent, getString(R.string.label_context_characters),
+        batchModeInput = addOption(parent, R.string.label_batch_mode);
+        batchCharactersInput = addField(parent, getString(R.string.label_batch_characters),
                 Integer.toString(Config.DEF_CONTEXT_CHARACTERS), InputType.TYPE_CLASS_NUMBER);
-        addOptionHint(parent, R.string.hint_context_mode);
+        addOptionHint(parent, R.string.hint_batch_mode);
 
         TextView glossaryLabel = new TextView(this);
         glossaryLabel.setText(R.string.label_glossary);
@@ -966,7 +966,7 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
 
     private EditText[] configurationFields() {
         return new EditText[] {urlInput, keyInput, modelInput, headersInput,
-                systemPromptInput, timeoutInput, concurrencyInput, testTextInput, contextCharactersInput};
+                systemPromptInput, timeoutInput, concurrencyInput, testTextInput, batchCharactersInput};
     }
 
     /** 无效快照的占位值不是用户保存的设置；锁定页面直到用户明确重置。 */
@@ -985,7 +985,7 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
             messageTarget.setChecked(false);
             serverNameTarget.setChecked(false);
             channelNameTarget.setChecked(false);
-            contextEnabledInput.setChecked(false);
+            batchModeInput.setChecked(false);
             showGlossary(GlossaryLibrary.EMPTY);
             loggingInput.setChecked(false);
             streamingInput.setChecked(false);
@@ -1063,8 +1063,8 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
             messageTarget.setChecked(snapshot.translateMessages);
             serverNameTarget.setChecked(snapshot.translateServerNames);
             channelNameTarget.setChecked(snapshot.translateChannelNames);
-            contextEnabledInput.setChecked(snapshot.contextEnabled);
-            setTextOrPlaceholder(contextCharactersInput, Integer.toString(snapshot.contextCharacters),
+            batchModeInput.setChecked(snapshot.contextEnabled);
+            setTextOrPlaceholder(batchCharactersInput, Integer.toString(snapshot.contextCharacters),
                     Integer.toString(Config.DEF_CONTEXT_CHARACTERS));
             showGlossary(snapshot.glossaryLibrary);
             loggingInput.setChecked(snapshot.loggingEnabled);
@@ -1290,7 +1290,7 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
         messageTarget.setEnabled(formAvailable);
         serverNameTarget.setEnabled(formAvailable);
         channelNameTarget.setEnabled(formAvailable);
-        contextEnabledInput.setEnabled(formAvailable);
+        batchModeInput.setEnabled(formAvailable);
         boolean glossaryAvailable = canEditGlossary();
         glossarySpinner.setEnabled(glossaryAvailable && !glossaryDraft.packs().isEmpty());
         glossaryImportButton.setEnabled(glossaryAvailable);
@@ -1337,15 +1337,15 @@ public class SettingsActivity extends Activity implements XposedServiceConnectio
         memoryPrefs.put(Config.KEY_TRANSLATE_MESSAGES, messageTarget.isChecked());
         memoryPrefs.put(Config.KEY_TRANSLATE_SERVER_NAMES, serverNameTarget.isChecked());
         memoryPrefs.put(Config.KEY_TRANSLATE_CHANNEL_NAMES, channelNameTarget.isChecked());
-        memoryPrefs.put(Config.KEY_CONTEXT_ENABLED, contextEnabledInput.isChecked());
-        Object context = parseIntInput(contextCharactersInput, Config.DEF_CONTEXT_CHARACTERS);
-        if (!(context instanceof Integer) || (Integer) context < Config.MIN_CONTEXT_CHARACTERS
-                || (Integer) context > Config.MAX_CONTEXT_CHARACTERS) {
-            contextCharactersInput.setError(getString(R.string.error_context_characters,
+        memoryPrefs.put(Config.KEY_CONTEXT_ENABLED, batchModeInput.isChecked());
+        Object batchCharacters = parseIntInput(batchCharactersInput, Config.DEF_CONTEXT_CHARACTERS);
+        if (!(batchCharacters instanceof Integer) || (Integer) batchCharacters < Config.MIN_CONTEXT_CHARACTERS
+                || (Integer) batchCharacters > Config.MAX_CONTEXT_CHARACTERS) {
+            batchCharactersInput.setError(getString(R.string.error_batch_characters,
                     Config.MIN_CONTEXT_CHARACTERS, Config.MAX_CONTEXT_CHARACTERS));
             return Config.invalidSnapshot();
         }
-        memoryPrefs.put(Config.KEY_CONTEXT_CHARACTERS, context);
+        memoryPrefs.put(Config.KEY_CONTEXT_CHARACTERS, batchCharacters);
         memoryPrefs.put(Config.KEY_GLOSSARY_LIBRARY, glossaryDraft.toJson());
         memoryPrefs.put(Config.KEY_LOGGING_ENABLED, loggingInput.isChecked());
         memoryPrefs.put(Config.KEY_PROTOCOL,

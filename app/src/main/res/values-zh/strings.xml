@@ -149,10 +149,10 @@
     <string name="target_server_names">服务器名称</string>
     <string name="target_channel_names">频道名称</string>
     <string name="hint_name_targets">名称翻译适用于 Discord 352.17 的语音浮层及语音频道选择器搜索结果。</string>
-    <string name="label_context_mode">精翻模式</string>
-    <string name="label_context_characters">上下文字符上限</string>
-    <string name="hint_context_mode">在翻译范围允许的频道或私信内，将先前已显示的消息作为上下文发送给翻译服务。</string>
-    <string name="error_context_characters">请输入 %1$d 到 %2$d 之间的整数。</string>
+    <string name="label_batch_mode">精翻模式（按批翻译）</string>
+    <string name="label_batch_characters">每批字符上限</string>
+    <string name="hint_batch_mode">将同一允许翻译的频道或私信内待译的消息正文合为一次请求，译文按消息分别显示。超出上限的长消息完整单独发送。</string>
+    <string name="error_batch_characters">请输入 %1$d 到 %2$d 之间的每批字符数。</string>
     <string name="label_glossary">术语包</string>
     <string name="glossary_disabled">不使用术语包</string>
     <string name="glossary_entry">%1$s（%2$d 条）</string>

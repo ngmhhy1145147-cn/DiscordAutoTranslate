@@ -149,10 +149,10 @@
     <string name="target_server_names">Server names</string>
     <string name="target_channel_names">Channel names</string>
     <string name="hint_name_targets">In Discord 352.17, names can be translated in the voice overlay and voice channel search results.</string>
-    <string name="label_context_mode">Context-aware translation</string>
-    <string name="label_context_characters">Maximum context characters</string>
-    <string name="hint_context_mode">Sends preceding messages already seen in the same channel or DM to your translation provider as context, within your translation scope.</string>
-    <string name="error_context_characters">Enter a number between %1$d and %2$d.</string>
+    <string name="label_batch_mode">Quality mode (batch translation)</string>
+    <string name="label_batch_characters">Maximum characters per batch</string>
+    <string name="hint_batch_mode">Groups pending message bodies from the same allowed channel or DM into one translation request. Each message receives its own translation. A message over the limit is sent intact on its own.</string>
+    <string name="error_batch_characters">Enter a batch size from %1$d to %2$d characters.</string>
     <string name="label_glossary">Glossary pack</string>
     <string name="glossary_disabled">No glossary</string>
     <string name="glossary_entry">%1$s (%2$d terms)</string>

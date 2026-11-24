@@ -154,8 +154,13 @@ public final class MessageHooks {
         if (!validMessageId) {
             return;
         }
-        HookBridge.get().forgetMessageLocation(messageId);
-        MessageLocation location = locationReader.read(model);
+        MessageLocation location;
+        try {
+            location = locationReader.read(model);
+        } catch (RuntimeException | Error failure) {
+            HookBridge.get().forgetMessageLocation(messageId);
+            throw failure;
+        }
         HookBridge.get().rememberMessageLocation(messageId, location);
         String revisionGetter = spec.optString("editedTimestampGetter", null);
         if (revisionGetter != null) {

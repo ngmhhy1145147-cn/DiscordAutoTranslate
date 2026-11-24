@@ -86,11 +86,11 @@ public class EmbedCardStateTest {
 
     private void installEngine(Config.Snapshot config, boolean fail) throws Exception {
         bridgeField("configuration").set(bridge, new HookBridge.TranslationConfiguration(
-                config, (text, precedingContext) -> {
+                config, text -> {
             requests.add(text);
             if (fail) throw new IllegalStateException("fake translation failure");
             return "译文：" + text;
-        }));
+        }, texts -> { throw new AssertionError("Embed must not enter a message batch"); }));
     }
 
     /** Use the existing package-private test dispatcher seam from the hooks test package. */

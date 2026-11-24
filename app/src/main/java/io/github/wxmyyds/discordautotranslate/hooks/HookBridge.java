@@ -8,17 +8,24 @@ import androidx.annotation.Nullable;
 
 import io.github.wxmyyds.discordautotranslate.core.Config;
 import io.github.wxmyyds.discordautotranslate.core.EnglishDetector;
+import io.github.wxmyyds.discordautotranslate.core.RetainedNodeMarkers;
 import io.github.wxmyyds.discordautotranslate.core.Scheduler;
+import io.github.wxmyyds.discordautotranslate.core.Segments;
 import io.github.wxmyyds.discordautotranslate.core.StateStore;
 import io.github.wxmyyds.discordautotranslate.core.TextExtractor;
 import io.github.wxmyyds.discordautotranslate.core.TranslationCache;
 import io.github.wxmyyds.discordautotranslate.core.TranslationException;
+import io.github.wxmyyds.discordautotranslate.core.TranslationScope;
 import io.github.wxmyyds.discordautotranslate.core.TranslationTaskId;
 import io.github.wxmyyds.discordautotranslate.translate.JsonApiEngine;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * 渲染层与翻译状态之间的桥。
@@ -49,7 +56,8 @@ public final class HookBridge {
 
     /** Bounded server/channel locations; only native message row bindings own these records. */
     private final Map<String, MessageLocation> messageLocations = boundedMap(512);
-    private final MessageContext messageContext = new MessageContext();
+    private final MessageBatchQueue qualityBatches = new MessageBatchQueue(
+            Scheduler.MainThread::postDelayed, this::submitQualityBatch);
 
     void rememberMessageLocation(String messageId, MessageLocation location) {
         messageLocations.put(messageId, location);
@@ -57,7 +65,6 @@ public final class HookBridge {
 
     void forgetMessageLocation(String messageId) {
         messageLocations.remove(messageId);
-        messageContext.forget(messageId);
     }
 
     /** One gate for bodies, Embed/Poll slots, retries and async ownership. Unknown location is denied. */
@@ -130,15 +137,19 @@ public final class HookBridge {
     static final class TranslationConfiguration {
         final Config.Snapshot snapshot;
         final Scheduler.Engine engine;
+        final Scheduler.BatchEngine batchEngine;
 
-        TranslationConfiguration(Config.Snapshot snapshot, Scheduler.Engine engine) {
+        TranslationConfiguration(Config.Snapshot snapshot, Scheduler.Engine engine,
+                                 Scheduler.BatchEngine batchEngine) {
             this.snapshot = snapshot;
             this.engine = engine;
+            this.batchEngine = batchEngine;
         }
     }
 
     private static TranslationConfiguration configure(Config.Snapshot snapshot) {
-        return new TranslationConfiguration(snapshot, new JsonApiEngine(snapshot));
+        JsonApiEngine engine = new JsonApiEngine(snapshot);
+        return new TranslationConfiguration(snapshot, engine, engine);
     }
 
     private volatile TranslationConfiguration configuration = configure(Config.read(null));
@@ -167,11 +178,15 @@ public final class HookBridge {
         // version() 已包含密钥/额外请求头指纹：凭据变更同样会使缓存与在途结果失效。
         boolean invalidate = !old.version().equals(c.version())
                 || !old.translationScope.sameMatchingPolicy(c.translationScope);
-        if (invalidate || old.enabled != c.enabled) messageContext.clear();
         if (invalidate) {
             StateStore.get().onNewGeneration();
+            qualityBatches.clear();
             TranslationCache.get().clear();
             CardState.clear();
+        } else if (!c.enabled && old.enabled) {
+            for (Scheduler.BatchItem item : qualityBatches.clear()) {
+                StateStore.get().complete(item.id, false, null, null);
+            }
         }
         // Dispatch newly admitted work only after configuration, state, and engine agree.
         Scheduler.get().setMaxConcurrency(c.maxConcurrency);
@@ -220,7 +235,7 @@ public final class HookBridge {
         viewToMessageId.clear();
         messageRevisions.clear();
         messageLocations.clear();
-        messageContext.clear();
+        qualityBatches.clear();
         contentIdentityToMessageId.clear();
         CardState.clear();
     }
@@ -301,7 +316,7 @@ public final class HookBridge {
         for (Object text : texts) {
             TextExtractor.Result ex = TextExtractor.extract(text);
             String hash = ex == null || ex.text.trim().isEmpty() ? null
-                    : contentHashOf(ex, snapshot, "");
+                    : contentHashOf(ex, snapshot, null);
             hashes.add(hash);
             identity.append(hash == null ? "EMPTY" : hash).append('\u0000');
         }
@@ -328,7 +343,7 @@ public final class HookBridge {
     StateStore.Entry matchingState(String key, @Nullable TextExtractor.Result extracted) {
         StateStore.Entry entry = StateStore.get().peek(key);
         return entry != null && extracted != null
-                && contentHashOf(extracted, configuration.snapshot, entry.contextHash)
+                && contentHashOf(extracted, configuration.snapshot, key)
                         .equals(entry.contentHash) ? entry : null;
     }
 
@@ -342,7 +357,7 @@ public final class HookBridge {
         TextExtractor.Result ex = TextExtractor.extract(structurable);
         return ex == null || ex.text.trim().isEmpty() ? null
                 : stateKey(rowMessageId, POLL_KEY_PREFIX + slot + "\u0000",
-                        contentHashOf(ex, configuration.snapshot, ""));
+                        contentHashOf(ex, configuration.snapshot, null));
     }
 
     static boolean isPollKey(@Nullable String key) {
@@ -392,10 +407,17 @@ public final class HookBridge {
     }
 
     /** 与 {@link #onMessageBound} 同口径的内容哈希（含多片段缓存命名空间）。 */
-    private static String contentHashOf(TextExtractor.Result ex, Config.Snapshot cfg, String contextHash) {
+    private static String contentHashOf(TextExtractor.Result ex, Config.Snapshot cfg,
+                                        @Nullable String messageId) {
         String hashInput = ex.segmentCount >= 2 ? ex.text + SEGMENT_CACHE_SUFFIX : ex.text;
         String sourceHash = Scheduler.contentHash(hashInput, cfg.version());
-        return contextHash.isEmpty() ? sourceHash : Scheduler.contentHash(sourceHash, contextHash);
+        // Whole-batch context can distinguish identical source text in different messages.
+        return qualityBody(cfg, messageId) ? Scheduler.contentHash(sourceHash, "batch:" + messageId)
+                : sourceHash;
+    }
+
+    private static boolean qualityBody(Config.Snapshot cfg, @Nullable String messageId) {
+        return cfg.contextEnabled && TranslationScope.isValidId(messageId);
     }
 
     /**
@@ -446,16 +468,11 @@ public final class HookBridge {
             ProjectLog.infoOnce("translation.scopeDenied", "translation skipped: translation scope denied");
             return;
         }
-        // Only a canonical body may add preceding reference text. Card slots and reply
-        // projections retain their original request/display ownership.
-        MessageLocation location = cfg.contextEnabled && !isCardKey(messageId)
-                ? messageLocations.get(messageId) : null;
-        String context = location == null ? null
-                : messageContext.capture(messageId, location, ex.text, cfg.contextCharacters);
-        String contextHash = context == null || context.isEmpty()
-                ? "" : Scheduler.contentHash(context, "preceding context");
-        String hash = contentHashOf(ex, cfg, contextHash);
-        StateStore.Entry entry = StateStore.get().obtain(messageId, hash, contextHash);
+        boolean grouped = cfg.contextEnabled && !isCardKey(messageId);
+        MessageLocation location = grouped ? messageLocations.get(messageId) : null;
+        if (grouped && (location == null || !qualityBody(cfg, messageId))) return;
+        String hash = contentHashOf(ex, cfg, messageId);
+        StateStore.Entry entry = StateStore.get().obtain(messageId, hash);
         rememberCanonicalContent(messageId, structurableText);
         if (entry.status == StateStore.Status.TRANSLATING
                 || entry.status == StateStore.Status.TRANSLATED) {
@@ -489,7 +506,13 @@ public final class HookBridge {
         TranslationTaskId task = StateStore.get().begin(entry);
         if (task == null) return;
         refreshTranslation(messageId);
-        Scheduler.get().submit(task, ex.text, context, runtime.engine,
+        if (grouped) {
+            qualityBatches.offer(location, new Scheduler.BatchItem(task, ex.text),
+                    RetainedNodeMarkers.sourceCharacters(ex.text), cfg.contextCharacters,
+                    StateStore.get()::owns);
+            return;
+        }
+        Scheduler.get().submit(task, ex.text, runtime.engine,
                 identity -> HookRuntime.isActive()
                         && translationAllowed(identity.messageId, configuration.snapshot)
                         && StateStore.get().owns(identity),
@@ -498,6 +521,93 @@ public final class HookBridge {
                         if (lease != null) onTranslateResult(identity, accepted, translated, error);
                     }
                 });
+    }
+
+    private boolean qualityMemberAllowed(TranslationTaskId task, MessageLocation location) {
+        Config.Snapshot snapshot = configuration.snapshot;
+        if (!HookRuntime.isActive() || !qualityBody(snapshot, task.messageId)
+                || !location.equals(messageLocations.get(task.messageId))
+                || !translationAllowed(task.messageId, snapshot)
+                || !StateStore.get().owns(task)) return false;
+        StateStore.Source source = StateStore.get().source(task.messageId);
+        MessageRevision revision = messageRevisions.get(task.messageId);
+        return source != null && source.revisionKnown == (revision != null)
+                && (revision == null || Objects.equals(revision.editedTimestamp, source.editedTimestamp));
+    }
+
+    private void submitQualityBatch(MessageLocation location, List<Scheduler.BatchItem> batch,
+                                    @Nullable Throwable error) {
+        try (HookRuntime.Lease lease = HookRuntime.enter()) {
+            if (lease == null) return;
+            if (error != null) {
+                completeQualityBatch(location, batch, batch, true, null, error);
+                return;
+            }
+            Scheduler.get().submitBatch(batch, configuration.batchEngine,
+                    id -> qualityMemberAllowed(id, location),
+                    (requested, accepted, translated, failure) -> {
+                        try (HookRuntime.Lease delivery = HookRuntime.enter()) {
+                            if (delivery != null) completeQualityBatch(
+                                    location, batch, requested, accepted, translated, failure);
+                        }
+                    });
+        }
+    }
+
+    /** Prepare every still-owned native projection before exposing a new translation for any row. */
+    void completeQualityBatch(MessageLocation location, List<Scheduler.BatchItem> batch,
+                              List<Scheduler.BatchItem> requested, boolean accepted,
+                              @Nullable List<String> translated, @Nullable Throwable error) {
+        Map<TranslationTaskId, String> outcomes = new HashMap<>();
+        Throwable failure = error;
+        if (accepted) {
+            if (failure == null && (translated == null || translated.size() != requested.size())) {
+                failure = invalidBatchTranslation();
+            }
+            for (int i = 0; i < requested.size(); i++) {
+                Scheduler.BatchItem item = requested.get(i);
+                if (!qualityMemberAllowed(item.id, location)) continue;
+                String result = failure == null ? translated.get(i) : null;
+                if (failure == null && !canRenderQualityTranslation(item, result)) {
+                    failure = invalidBatchTranslation();
+                }
+                outcomes.put(item.id, result);
+            }
+        }
+
+        List<String> refresh = new ArrayList<>(batch.size());
+        StateStore store = StateStore.get();
+        for (Scheduler.BatchItem item : batch) {
+            boolean admitted = outcomes.containsKey(item.id) && qualityMemberAllowed(item.id, location);
+            String result = admitted && failure == null ? outcomes.get(item.id) : null;
+            String description = admitted && failure != null ? describe(failure) : null;
+            if (!store.complete(item.id, admitted, result, description)) continue;
+            if (result != null) TranslationCache.get().put(item.id.contentHash, result);
+            refresh.add(item.id.messageId);
+        }
+        // Native redraw may consume other members' state (e.g. reply projections).
+        for (String id : refresh) refreshTranslation(id);
+    }
+
+    private boolean canRenderQualityTranslation(Scheduler.BatchItem item, @Nullable String result) {
+        if (result == null || Segments.plainTextViolation(result, item.text) != null) return false;
+        StateStore.Source original = StateStore.get().source(item.id.messageId);
+        if (original == null) return false;
+        try {
+            TextExtractor.Result extracted = TextExtractor.extract(original.content);
+            return extracted != null && item.text.equals(extracted.text)
+                    && StructurableTextFactory.forPlannedTranslation(
+                            original.content, result, extracted) != null;
+        } catch (RuntimeException | LinkageError error) {
+            ProjectLog.warnOnce("translation.batchProjection",
+                    "batch projection failed errorClass=" + error.getClass().getSimpleName());
+            return false;
+        }
+    }
+
+    private static TranslationException invalidBatchTranslation() {
+        return new TranslationException(TranslationException.Kind.PARSE,
+                TranslationException.Reason.TRANSLATION_INVALID, "精翻译文与原消息结构不匹配");
     }
 
     /** Complete task ownership is validated before every transition, including discarded results. */
