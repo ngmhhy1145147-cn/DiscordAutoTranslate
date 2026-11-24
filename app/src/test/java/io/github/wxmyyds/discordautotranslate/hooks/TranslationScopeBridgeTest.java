@@ -133,7 +133,7 @@ public class TranslationScopeBridgeTest {
     }
 
     @Test
-    public void malformedBatchMemberFailsEveryAdmittedResultWithoutCachingEarlierRows()
+    public void malformedBatchFailsAllRowsAndRetryAppliesAllValidResultsByMessage()
             throws Exception {
         Config.Snapshot quality = Config.read(new MemoryPrefs()
                 .put(Config.KEY_CONTEXT_ENABLED, true)
@@ -147,7 +147,10 @@ public class TranslationScopeBridgeTest {
         Field constructor = StructurableTextFactory.class.getDeclaredField("sPrimitiveCtor");
         constructor.setAccessible(true);
         Object previous = constructor.get(null);
-        constructor.set(null, PrimitiveStructurableText.class.getDeclaredConstructor(String.class));
+        java.lang.reflect.Constructor<?> primitive =
+                PrimitiveStructurableText.class.getDeclaredConstructor(String.class);
+        primitive.setAccessible(true);
+        constructor.set(null, primitive);
         try {
             bridge.completeQualityBatch(location, batch, batch, true,
                     List.of("第一条译文", "无效锚点<keep17/>"), null);
@@ -156,6 +159,22 @@ public class TranslationScopeBridgeTest {
                 assertEquals(StateStore.Status.FAILED, entry.status);
                 assertNull(entry.translatedText);
                 assertNull(TranslationCache.get().get(item.id.contentHash));
+            }
+
+            List<Scheduler.BatchItem> retry = new java.util.ArrayList<>();
+            for (Scheduler.BatchItem item : batch) {
+                StateStore.Entry entry = store.peek(item.id.messageId);
+                assertTrue(store.prepareRetry(entry));
+                retry.add(new Scheduler.BatchItem(store.begin(entry), item.text));
+            }
+            List<String> values = List.of("第一条译文", "第二条译文");
+            bridge.completeQualityBatch(location, retry, retry, true, values, null);
+            for (int i = 0; i < retry.size(); i++) {
+                Scheduler.BatchItem item = retry.get(i);
+                StateStore.Entry entry = store.peek(item.id.messageId);
+                assertEquals(StateStore.Status.TRANSLATED, entry.status);
+                assertEquals(values.get(i), entry.translatedText);
+                assertEquals(values.get(i), TranslationCache.get().get(item.id.contentHash));
             }
         } finally {
             constructor.set(null, previous);

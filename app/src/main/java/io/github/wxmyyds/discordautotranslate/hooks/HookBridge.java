@@ -69,10 +69,13 @@ public final class HookBridge {
 
     /** One gate for bodies, Embed/Poll slots, retries and async ownership. Unknown location is denied. */
     boolean translationAllowed(String key, Config.Snapshot snapshot) {
-        if (!snapshot.enabled || !snapshot.translateMessages
-                || snapshot.configError != null) return false;
-        MessageLocation location = messageLocations.get(cardRowOf(key));
-        return location != null && snapshot.translationScope.allows(location.guildId, location.channelId);
+        return translationAllowed(messageLocations.get(cardRowOf(key)), snapshot);
+    }
+
+    private static boolean translationAllowed(@Nullable MessageLocation location,
+                                              Config.Snapshot snapshot) {
+        return snapshot.enabled && snapshot.translateMessages && snapshot.configError == null
+                && location != null && snapshot.translationScope.allows(location.guildId, location.channelId);
     }
 
     /** Only native row bindings own edit metadata; source snapshots live with state. */
@@ -525,9 +528,10 @@ public final class HookBridge {
 
     private boolean qualityMemberAllowed(TranslationTaskId task, MessageLocation location) {
         Config.Snapshot snapshot = configuration.snapshot;
+        MessageLocation current = messageLocations.get(task.messageId);
         if (!HookRuntime.isActive() || !qualityBody(snapshot, task.messageId)
-                || !location.equals(messageLocations.get(task.messageId))
-                || !translationAllowed(task.messageId, snapshot)
+                || !location.equals(current)
+                || !translationAllowed(current, snapshot)
                 || !StateStore.get().owns(task)) return false;
         StateStore.Source source = StateStore.get().source(task.messageId);
         MessageRevision revision = messageRevisions.get(task.messageId);
